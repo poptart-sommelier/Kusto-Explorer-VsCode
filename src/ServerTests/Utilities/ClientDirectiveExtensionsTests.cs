@@ -10,6 +10,9 @@ namespace Tests.Utilities;
 [TestClass]
 public class ClientDirectiveExtensionsTests
 {
+    private const string LogAnalyticsUri =
+        "https://ade.loganalytics.io/subscriptions/sub/resourcegroups/rg/providers/microsoft.operationalinsights/workspaces/ws";
+
     #region TryGetConnectionInfo - Database Directive Tests
 
     [TestMethod]
@@ -164,6 +167,36 @@ public class ClientDirectiveExtensionsTests
         Assert.IsTrue(result);
         Assert.IsNotNull(connection);
         Assert.AreEqual("mycluster.kusto.windows.net", cluster);
+    }
+
+    [TestMethod]
+    public void TryGetConnectionInfo_ConnectDirective_LogAnalyticsUrl_PreservesFullPath()
+    {
+        var parsed = ClientDirective.TryParse($"#connect \"{LogAnalyticsUri}\"", out var directive);
+        Assert.IsTrue(parsed);
+
+        var result = directive!.TryGetConnectionInfo(out var connection, out var cluster, out var database);
+
+        Assert.IsTrue(result);
+        Assert.AreEqual(LogAnalyticsUri, connection);
+        Assert.AreEqual(LogAnalyticsUri, cluster);
+        Assert.AreEqual("NetDefaultDB", database);
+    }
+
+    [TestMethod]
+    public void TryGetConnectionInfo_ConnectDirective_LogAnalyticsClusterSyntax_PreservesFullPath()
+    {
+        var parsed = ClientDirective.TryParse(
+            $"#connect cluster(\"{LogAnalyticsUri}\").database(\"ws\")",
+            out var directive);
+        Assert.IsTrue(parsed);
+
+        var result = directive!.TryGetConnectionInfo(out var connection, out var cluster, out var database);
+
+        Assert.IsTrue(result);
+        Assert.IsNull(connection);
+        Assert.AreEqual(LogAnalyticsUri, cluster);
+        Assert.AreEqual("ws", database);
     }
 
     [TestMethod]

@@ -54,7 +54,15 @@ public static class ClientDirectiveExtensions
                 var cluster = GetStringValueAfterPrefix(arg.Text, "cluster(", 0, out var end);
                 if (cluster != null)
                 {
-                    KustoFacts.GetHostAndPath(cluster, out clusterName, out var path);
+                    string? path = null;
+                    if (ConnectionFacts.IsAzureMonitorProxyUri(cluster))
+                    {
+                        clusterName = cluster.TrimEnd('/');
+                    }
+                    else
+                    {
+                        KustoFacts.GetHostAndPath(cluster, out clusterName, out path);
+                    }
                     databaseName = GetStringValueAfterPrefix(arg.Text, "database(", end, out _)
                         ?? path;
                     return clusterName != null;
@@ -64,7 +72,9 @@ public static class ClientDirectiveExtensions
             {
                 connection = GetDirectiveArgumentStringValue(arg);
                 var builder = new KustoConnectionStringBuilder(connection);
-                clusterName = builder.Hostname;
+                clusterName = ConnectionFacts.IsAzureMonitorProxyUri(builder.DataSource)
+                    ? builder.DataSource.TrimEnd('/')
+                    : builder.Hostname;
                 databaseName = builder.InitialCatalog;
                 return true;
             }

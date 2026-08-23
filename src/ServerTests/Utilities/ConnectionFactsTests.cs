@@ -9,6 +9,44 @@ namespace Tests.Utilities;
 public class ConnectionFactsTests
 {
     private const string DefaultDomain = ".kusto.windows.net";
+    private const string LogAnalyticsUri =
+        "https://ade.loganalytics.io/subscriptions/sub/resourcegroups/rg/providers/microsoft.operationalinsights/workspaces/ws";
+
+    #region GetClusterName Tests
+
+    [TestMethod]
+    public void GetClusterName_LogAnalyticsUri_PreservesFullPath()
+    {
+        var result = ConnectionFacts.GetClusterName(LogAnalyticsUri, DefaultDomain);
+
+        Assert.AreEqual(LogAnalyticsUri, result);
+    }
+
+    [TestMethod]
+    public void GetClusterName_LogAnalyticsUriWithTrailingSlash_RemovesTrailingSlash()
+    {
+        var result = ConnectionFacts.GetClusterName($"{LogAnalyticsUri}/", DefaultDomain);
+
+        Assert.AreEqual(LogAnalyticsUri, result);
+    }
+
+    [TestMethod]
+    public void GetClusterName_StandardClusterUri_ReturnsHostName()
+    {
+        var result = ConnectionFacts.GetClusterName("https://mycluster.kusto.windows.net", DefaultDomain);
+
+        Assert.AreEqual("mycluster.kusto.windows.net", result);
+    }
+
+    [TestMethod]
+    public void GetClusterName_StandardClusterUriWithDatabasePath_ReturnsHostName()
+    {
+        var result = ConnectionFacts.GetClusterName("https://mycluster.kusto.windows.net/mydb", DefaultDomain);
+
+        Assert.AreEqual("mycluster.kusto.windows.net", result);
+    }
+
+    #endregion
 
     #region GetFullHostName - Cluster Name Tests
 

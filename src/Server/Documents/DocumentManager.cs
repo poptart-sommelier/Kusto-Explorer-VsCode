@@ -260,7 +260,7 @@ public class DocumentManager : IDocumentManager
 
             // find all explicit cluster('xxx') references
             var referencedClusterNames = document.GetClusterReferences(cancellationToken)
-                .Select(cr => ConnectionFacts.GetFullHostName(cr.Cluster, globals.Domain))
+                .Select(cr => ConnectionFacts.GetClusterName(cr.Cluster, globals.Domain))
                 .Distinct()
                 .ToList();
 
@@ -275,7 +275,7 @@ public class DocumentManager : IDocumentManager
 
             // find all explicit database('xxx') references
             var dbRefs = document.GetDatabaseReferences(cancellationToken)
-                .Select(dbref => (Cluster: ConnectionFacts.GetFullHostName(dbref.Cluster, globals.Domain), Database: dbref.Database, ClusterRef: dbref.Cluster))
+                .Select(dbref => (Cluster: ConnectionFacts.GetClusterName(dbref.Cluster, globals.Domain), Database: dbref.Database, ClusterRef: dbref.Cluster))
                 .Distinct()
                 .ToList();
 
@@ -283,7 +283,7 @@ public class DocumentManager : IDocumentManager
             {
                 var cluster = string.IsNullOrEmpty(dbRef.Cluster)
                     ? globals.Cluster
-                    : globals.GetCluster(ConnectionFacts.GetFullHostName(dbRef.Cluster, globals.Domain));
+                    : globals.GetCluster(ConnectionFacts.GetClusterName(dbRef.Cluster, globals.Domain));
 
                 // don't rely on the user to do the right thing.
                 if (cluster == null
@@ -312,7 +312,7 @@ public class DocumentManager : IDocumentManager
             // get list of unique database references in the document
             var dbRefs = document
                 .GetDatabaseReferences(cancellationToken)
-                .Select(dbr => (Cluster: ConnectionFacts.GetFullHostName(dbr.Cluster, document.Globals.Domain), dbr.Database))
+                .Select(dbr => (Cluster: ConnectionFacts.GetClusterName(dbr.Cluster, document.Globals.Domain), dbr.Database))
                 .OfType<(string Cluster, string? Database)>()
                 .ToList();
 

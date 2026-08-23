@@ -10,6 +10,9 @@ namespace Tests.Features;
 [TestClass]
 public class ConnectionManagerTests
 {
+    private const string LogAnalyticsUri =
+        "https://ade.loganalytics.io/subscriptions/sub/resourcegroups/rg/providers/microsoft.operationalinsights/workspaces/ws";
+
     #region GetOrAddConnection Tests
 
     [TestMethod]
@@ -45,6 +48,16 @@ public class ConnectionManagerTests
         Assert.IsNotNull(connection);
         Assert.AreEqual("mycluster.kusto.windows.net", connection.Cluster);
         Assert.AreEqual("mydb", connection.Database);
+    }
+
+    [TestMethod]
+    public void GetOrAddConnection_LogAnalyticsUrl_PreservesFullWorkspaceUri()
+    {
+        var manager = new ConnectionManager();
+
+        var connection = manager.GetOrAddConnection(LogAnalyticsUri);
+
+        Assert.AreEqual(LogAnalyticsUri, connection.Cluster);
     }
 
     [TestMethod]
@@ -87,6 +100,19 @@ public class ConnectionManagerTests
 
         Assert.IsTrue(found);
         Assert.IsNotNull(connection);
+    }
+
+    [TestMethod]
+    public void TryGetConnection_LogAnalyticsUrl_ReturnsWorkspaceConnection()
+    {
+        var manager = new ConnectionManager();
+        manager.GetOrAddConnection(LogAnalyticsUri);
+
+        var found = manager.TryGetConnection(LogAnalyticsUri, out var connection);
+
+        Assert.IsTrue(found);
+        Assert.IsNotNull(connection);
+        Assert.AreEqual(LogAnalyticsUri, connection.Cluster);
     }
 
     [TestMethod]
@@ -175,6 +201,18 @@ public class ConnectionManagerTests
         var newConnection = connection.WithDatabase("mydb");
 
         Assert.AreEqual("mydb", newConnection.Database);
+    }
+
+    [TestMethod]
+    public void WithDatabase_LogAnalyticsUrl_PreservesFullWorkspaceUri()
+    {
+        var manager = new ConnectionManager();
+        var connection = manager.GetOrAddConnection(LogAnalyticsUri);
+
+        var newConnection = connection.WithDatabase("ws");
+
+        Assert.AreEqual(LogAnalyticsUri, newConnection.Cluster);
+        Assert.AreEqual("ws", newConnection.Database);
     }
 
     #endregion

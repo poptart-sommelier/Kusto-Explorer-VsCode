@@ -80,10 +80,13 @@ public class ConnectionManager : IConnectionManager
             var cluster = info.Connection.Cluster;
             ImmutableInterlocked.GetOrAdd(ref _clusterToInfoMap, cluster, info);
 
-            var shortName = KustoFacts.GetShortHostName(cluster, _defaultDomain);
-            if (shortName != cluster)
+            if (!cluster.Contains('/'))
             {
-                ImmutableInterlocked.GetOrAdd(ref _clusterToInfoMap, shortName, info);
+                var shortName = KustoFacts.GetShortHostName(cluster, _defaultDomain);
+                if (shortName != cluster)
+                {
+                    ImmutableInterlocked.GetOrAdd(ref _clusterToInfoMap, shortName, info);
+                }
             }
         }
 
@@ -241,12 +244,12 @@ public class ConnectionManager : IConnectionManager
             return _fallbackBuilder;
         }
 
-        public string Cluster => _primaryBuilder.Hostname;
+        public string Cluster => ConnectionFacts.GetClusterName(_primaryBuilder.DataSource, _manager._defaultDomain);
         public string? Database => _primaryBuilder.InitialCatalog;
 
         public IConnection WithCluster(string clusterName)
         {
-            var clusterUri = KustoFacts.GetFullHostName(clusterName, _manager._defaultDomain);
+            var clusterUri = ConnectionFacts.GetClusterName(clusterName, _manager._defaultDomain);
 
             if (!clusterUri.Contains("://")
                 && !string.IsNullOrEmpty(_primaryBuilder.ConnectionScheme))

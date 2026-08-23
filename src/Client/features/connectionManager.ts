@@ -99,11 +99,21 @@ function getHostNameSimple(connection: string): string {
     }
     try {
         const url = new URL(dataSource.startsWith('https://') ? dataSource : `https://${dataSource}`);
+        if (isAzureMonitorProxyHost(url.hostname) && url.pathname !== '/') {
+            return url.toString().replace(/\/$/, '');
+        }
         return url.hostname;
     } catch {
         // If it's not a valid URL, return as-is (might already be just a hostname)
         return dataSource;
     }
+}
+
+function isAzureMonitorProxyHost(hostname: string): boolean {
+    return hostname === 'ade.loganalytics.io'
+        || hostname === 'ade.applicationinsights.io'
+        || hostname === 'adx.monitor.azure.us'
+        || hostname === 'adx.monitor.azure.cn';
 }
 
 /**

@@ -363,7 +363,9 @@ public class QueryManager : IQueryManager
                 {
                     Query = context.Query,
                     Connection = connection,
-                    Cluster = KustoFacts.GetFullHostName(clusterName, _optionsManager.DefaultDomain),
+                    Cluster = clusterName != null
+                        ? ConnectionFacts.GetClusterName(clusterName, _optionsManager.DefaultDomain)
+                        : null,
                     Database = databaseName
                 };
             }

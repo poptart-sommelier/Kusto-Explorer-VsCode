@@ -433,6 +433,18 @@ describe('ConnectionManager', () => {
             const name = await failMgr.getHostName('https://fallback.kusto.windows.net');
             expect(name).toBe('fallback.kusto.windows.net');
         });
+
+        it('preserves a Log Analytics workspace URL when server parsing fails', async () => {
+            const failServer = createMockServer({
+                decodeConnectionString: vi.fn(async () => { throw new Error('fail'); }),
+            });
+            const failMgr = new ConnectionManager(createMockContext(), failServer);
+            const workspaceUrl = 'https://ade.loganalytics.io/subscriptions/sub/resourcegroups/rg/providers/microsoft.operationalinsights/workspaces/ws';
+
+            const name = await failMgr.getHostName(workspaceUrl);
+
+            expect(name).toBe(workspaceUrl);
+        });
     });
 
     // ─── Edit / Rename Server ────────────────────────────────────────
