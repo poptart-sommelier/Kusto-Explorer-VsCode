@@ -58,6 +58,32 @@ public class ConnectionManagerTests
         var connection = manager.GetOrAddConnection(LogAnalyticsUri);
 
         Assert.AreEqual(LogAnalyticsUri, connection.Cluster);
+        Assert.AreEqual("ws", connection.Database);
+    }
+
+    [TestMethod]
+    public void GetOrAddConnection_ApplicationInsightsUrl_UsesComponentAsDatabase()
+    {
+        var manager = new ConnectionManager();
+        var uri =
+            "https://ade.applicationinsights.io/subscriptions/sub/resourcegroups/rg/providers/microsoft.insights/components/app";
+
+        var connection = manager.GetOrAddConnection(uri);
+
+        Assert.AreEqual(uri, connection.Cluster);
+        Assert.AreEqual("app", connection.Database);
+    }
+
+    [TestMethod]
+    public void GetOrAddConnection_SubscriptionScopedMonitorUrl_KeepsDefaultDatabase()
+    {
+        var manager = new ConnectionManager();
+        var uri = "https://ade.loganalytics.io/subscriptions/sub";
+
+        var connection = manager.GetOrAddConnection(uri);
+
+        Assert.AreEqual(uri, connection.Cluster);
+        Assert.AreEqual("NetDefaultDB", connection.Database);
     }
 
     [TestMethod]

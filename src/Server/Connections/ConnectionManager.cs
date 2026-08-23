@@ -102,6 +102,8 @@ public class ConnectionManager : IConnectionManager
                 builder.ConnectionScheme = "https://";
             }
 
+            builder.InitialCatalog = ConnectionFacts.GetDatabaseName(builder.DataSource, builder.InitialCatalog);
+
             // if is not explicitly a connection string, add federated security
             if (!connectionString.Contains(";"))
             {
@@ -263,7 +265,7 @@ public class ConnectionManager : IConnectionManager
             builder.DataSource = clusterUri;
             builder.ApplicationCertificateBlob = _primaryBuilder.ApplicationCertificateBlob;
             builder.ApplicationKey = _primaryBuilder.ApplicationKey;
-            builder.InitialCatalog = "NetDefaultDB";
+            builder.InitialCatalog = ConnectionFacts.GetDatabaseName(clusterUri, "NetDefaultDB");
 
             return new KustoConnection(_manager, builder);
         }

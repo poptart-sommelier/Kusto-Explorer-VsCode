@@ -90,6 +90,20 @@ public class ClientDirectiveExtensionsTests
         Assert.AreEqual("mydb", database);
     }
 
+    [TestMethod]
+    public void TryGetConnectionInfo_DatabaseDirective_LogAnalyticsUrl_PreservesFullPath()
+    {
+        var parsed = ClientDirective.TryParse($"#database \"{LogAnalyticsUri}\"", out var directive);
+        Assert.IsTrue(parsed);
+
+        var result = directive!.TryGetConnectionInfo(out var connection, out var cluster, out var database);
+
+        Assert.IsTrue(result);
+        Assert.IsNull(connection);
+        Assert.AreEqual(LogAnalyticsUri, cluster);
+        Assert.AreEqual("ws", database);
+    }
+
     #endregion
 
     #region TryGetConnectionInfo - Connect Directive Tests
@@ -180,7 +194,7 @@ public class ClientDirectiveExtensionsTests
         Assert.IsTrue(result);
         Assert.AreEqual(LogAnalyticsUri, connection);
         Assert.AreEqual(LogAnalyticsUri, cluster);
-        Assert.AreEqual("NetDefaultDB", database);
+        Assert.AreEqual("ws", database);
     }
 
     [TestMethod]
@@ -188,6 +202,22 @@ public class ClientDirectiveExtensionsTests
     {
         var parsed = ClientDirective.TryParse(
             $"#connect cluster(\"{LogAnalyticsUri}\").database(\"ws\")",
+            out var directive);
+        Assert.IsTrue(parsed);
+
+        var result = directive!.TryGetConnectionInfo(out var connection, out var cluster, out var database);
+
+        Assert.IsTrue(result);
+        Assert.IsNull(connection);
+        Assert.AreEqual(LogAnalyticsUri, cluster);
+        Assert.AreEqual("ws", database);
+    }
+
+    [TestMethod]
+    public void TryGetConnectionInfo_ConnectDirective_LogAnalyticsClusterOnly_DerivesDatabase()
+    {
+        var parsed = ClientDirective.TryParse(
+            $"#connect cluster(\"{LogAnalyticsUri}\")",
             out var directive);
         Assert.IsTrue(parsed);
 

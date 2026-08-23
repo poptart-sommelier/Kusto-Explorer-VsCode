@@ -46,6 +46,43 @@ public class ConnectionFactsTests
         Assert.AreEqual("mycluster.kusto.windows.net", result);
     }
 
+    [TestMethod]
+    public void GetDatabaseName_LogAnalyticsUri_ReturnsWorkspaceName()
+    {
+        var result = ConnectionFacts.GetDatabaseName(LogAnalyticsUri, "NetDefaultDB");
+
+        Assert.AreEqual("ws", result);
+    }
+
+    [TestMethod]
+    public void GetDatabaseName_ApplicationInsightsUri_ReturnsDecodedComponentName()
+    {
+        var uri =
+            "https://ade.applicationinsights.io/subscriptions/sub/resourcegroups/rg/providers/microsoft.insights/components/my%20app";
+
+        var result = ConnectionFacts.GetDatabaseName(uri, "NetDefaultDB");
+
+        Assert.AreEqual("my app", result);
+    }
+
+    [TestMethod]
+    public void GetDatabaseName_ExplicitDatabase_PreservesDatabase()
+    {
+        var result = ConnectionFacts.GetDatabaseName(LogAnalyticsUri, "other");
+
+        Assert.AreEqual("other", result);
+    }
+
+    [TestMethod]
+    public void GetDatabaseName_SubscriptionScopedUri_KeepsDefaultDatabase()
+    {
+        var result = ConnectionFacts.GetDatabaseName(
+            "https://ade.loganalytics.io/subscriptions/sub",
+            "NetDefaultDB");
+
+        Assert.AreEqual("NetDefaultDB", result);
+    }
+
     #endregion
 
     #region GetFullHostName - Cluster Name Tests

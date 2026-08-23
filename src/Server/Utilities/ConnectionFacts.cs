@@ -30,6 +30,39 @@ public static class ConnectionFacts
             && uri.AbsolutePath != "/";
     }
 
+    public static string? GetDatabaseName(string dataSource, string? databaseName)
+    {
+        if (!string.IsNullOrEmpty(databaseName)
+            && !databaseName.Equals("NetDefaultDB", StringComparison.OrdinalIgnoreCase))
+        {
+            return databaseName;
+        }
+
+        if (!Uri.TryCreate(dataSource, UriKind.Absolute, out var uri)
+            || !IsAzureMonitorProxyHost(uri.Host))
+        {
+            return databaseName;
+        }
+
+        var segments = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Length < 4
+            || !segments[^4].Equals("providers", StringComparison.OrdinalIgnoreCase))
+        {
+            return databaseName;
+        }
+
+        var isLogAnalyticsWorkspace =
+            segments[^3].Equals("microsoft.operationalinsights", StringComparison.OrdinalIgnoreCase)
+            && segments[^2].Equals("workspaces", StringComparison.OrdinalIgnoreCase);
+        var isApplicationInsightsComponent =
+            segments[^3].Equals("microsoft.insights", StringComparison.OrdinalIgnoreCase)
+            && segments[^2].Equals("components", StringComparison.OrdinalIgnoreCase);
+
+        return isLogAnalyticsWorkspace || isApplicationInsightsComponent
+            ? Uri.UnescapeDataString(segments[^1])
+            : databaseName;
+    }
+
     private static bool IsAzureMonitorProxyHost(string host)
     {
         return host.Equals("ade.loganalytics.io", StringComparison.OrdinalIgnoreCase)
