@@ -8,6 +8,11 @@ notebook-based investigation workflow to Kusto Explorer for VS Code.
 The plan is intentionally separate from the existing `.kql` editor and `.kqr` result viewer. Those
 features remain supported while the notebook workflow is built and evaluated.
 
+Phase 1 was implemented on August 28, 2026. It defines the versioned notebook and result-session
+contracts, adds repeatable 100,000-row server and client baseline tools, records service query-text
+budgets, and documents the planned ownership and lifecycle seams in `ARCHITECTURE.md`. The contracts
+are not wired to runtime handlers until the scalable result-session implementation begins.
+
 ## Goals
 
 The new workflow must make it practical to:

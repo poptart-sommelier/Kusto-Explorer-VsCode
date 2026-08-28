@@ -244,6 +244,92 @@ uses `acquireVsCodeApi()` + document-level click delegation for events, and post
 the extension. There is **no React/bundler for webview content**; CDN libraries (Plotly, Cytoscape,
 simple-datatables) are loaded directly. New webview UIs should match this pattern.
 
+### 3.4 Planned notebooks and scalable result sessions
+
+The investigative notebook design is additive: existing `.kql` editors and `.kqr` result viewers
+continue to use the current path, while `.kqlnb` files use VS Code's native Notebook API. The full
+product and delivery decisions are recorded in [PLAN.md](PLAN.md).
+
+The notebook file format is versioned independently of the extension. Version 1 stores ordered KQL
+and Markdown cells plus non-secret connection metadata. It deliberately has no serialized output
+field, so saving a notebook cannot accidentally persist result rows or credentials. The TypeScript
+contract and validator live in `features/notebookFormat.ts`; the serializer and notebook controller
+are Phase 2 work.
+
+Large notebook results must not follow the existing whole-result path. The planned ownership model
+is:
+
+```mermaid
+flowchart LR
+    NB["Native VS Code notebook"]
+    CTRL["Notebook controller<br/>extension host"]
+    RENDER["Virtualized renderer<br/>visible pages only"]
+    RPC["Typed kusto/* result-session RPC"]
+    STORE["Result-session store<br/>local .NET process"]
+    KUSTO[("ADX / Azure Monitor")]
+
+    NB --> CTRL
+    CTRL <--> RPC
+    RPC <--> STORE
+    STORE <--> KUSTO
+    RENDER <--> CTRL
+```
+
+- The local .NET process owns the complete typed snapshot.
+- The extension host owns execution and renderer coordination, not a duplicate result.
+- The renderer owns viewport and selection state and receives bounded pages only.
+- Each result table owns its own filtered-view status. Filters and sorts are submitted as a complete,
+  revisioned view model, and page responses carry that revision so the client can reject stale work.
+- Projection requests are paged and use compact row ranges; copying or continuing an investigation
+  must not become an unbounded full-result response.
+- Normal pages and projection pages are capped at 1,000 rows per request in the version 1 contract.
+- Cancellation uses an operation ID, while paging, filtering, and deterministic cleanup use the
+  result-session ID.
+- Status is intentionally pull-based in version 1. The controller polls while work is active, and
+  cancellation stops superseded execution or filtering rather than adding a second notification
+  channel.
+
+The version 1 cross-process shapes and stable method names are defined in
+`features/resultSession.ts` and `Utilities/ResultSessionContracts.cs`. They cover starting,
+cancelling, status/progress, applying a view, reading a page, reading a bounded projection, and
+disposing a session. These are contracts only in Phase 1; handlers and storage arrive with the
+scalable result-session implementation.
+
+#### Current-path performance baseline
+
+The repeatable benchmark uses 100,000 rows and 20 mixed-type columns. Run:
+
+```powershell
+dotnet run --configuration Release --project tools\ResultPipelineBenchmark\ResultPipelineBenchmark.csproj
+Set-Location src\Client
+npm run benchmark:results
+```
+
+The first baseline was captured on August 28, 2026 with .NET 10.0.11 and Node.js 24.4.1. Values are
+machine-specific evidence of data amplification, not release thresholds:
+
+| Current-path operation | Time | Retained/allocated size |
+|---|---:|---:|
+| Build server `DataTable` | 386 ms | 74 MB |
+| Convert to immutable `ResultTable` | 595 ms | +176 MB |
+| Serialize server result JSON | 715 ms | 45 MB JSON, +91 MB |
+| Server process working set after serialization | - | 538 MB |
+| Serialize the TypeScript result fixture | 103 ms | 37 MB JSON, +48 MB heap |
+| Format all cells and construct webview HTML synchronously | 923 ms | 41 MB HTML, +832 MB heap |
+
+The Node benchmark cannot measure scrolling or browser paint, but the synchronous 923 ms
+construction directly blocks the extension host before the webview can render. The result-session
+design removes both that full construction step and the complete TypeScript/webview copies.
+
+#### Follow-on query budgets
+
+Generated snapshot queries must be measured as complete UTF-8 text before execution. Azure Monitor
+and Log Analytics have a practical 64 KB query-text limit; native ADX permits approximately 1 MB.
+The implementation must reserve space for query structure and use a lower service-specific safety
+budget rather than filling either documented maximum. If an exact `datatable()` snapshot does not
+fit, the UI may offer a live predicate rerun, but it must explain the semantic difference and obtain
+confirmation.
+
 ---
 
 ## 4. The Server (.NET language server)
