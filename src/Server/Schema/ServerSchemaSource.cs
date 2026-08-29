@@ -6,6 +6,7 @@ using Kusto.Data.Common;
 using Kusto.Language;
 using Kusto.Language.Symbols;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using System.Collections.Immutable;
 
 namespace Kusto.Vscode;
@@ -31,6 +32,23 @@ public class ServerSchemaSource : ISchemaSource
 
     public async Task<ClusterInfo?> GetClusterInfoAsync(string clusterName, string? contextCluster, CancellationToken cancellationToken)
     {
+        var resourceDatabase = ConnectionFacts.GetDatabaseName(clusterName, null);
+        if (ConnectionFacts.IsAzureMonitorProxyUri(clusterName)
+            && !string.IsNullOrEmpty(resourceDatabase))
+        {
+            return new ClusterInfo
+            {
+                Databases =
+                [
+                    new DatabaseName
+                    {
+                        Name = resourceDatabase,
+                        AlternateName = resourceDatabase
+                    }
+                ]
+            };
+        }
+
         if (!_connectionManager.TryGetConnection(clusterName, null, contextCluster, out var conn))
             return null;
 
@@ -89,6 +107,11 @@ public class ServerSchemaSource : ISchemaSource
             return null;
         }
 
+        if (ConnectionFacts.IsAzureMonitorProxyUri(clusterName))
+        {
+            return await GetAzureMonitorDatabaseInfoAsync(conn, databaseName, cancellationToken).ConfigureAwait(false);
+        }
+
         var dbName = await GetBothDatabaseNamesAsync(conn, databaseName, cancellationToken).ConfigureAwait(false);
         if (dbName == null)
         {
@@ -127,6 +150,122 @@ public class ServerSchemaSource : ISchemaSource
             EntityGroups = entityGroups,
             GraphModels = graphModels,
             StoredQueryResults = storedResults
+        };
+    }
+
+    private async Task<DatabaseInfo?> GetAzureMonitorDatabaseInfoAsync(
+        IConnection connection,
+        string databaseName,
+        CancellationToken cancellationToken)
+    {
+        var escapedDatabaseName = KustoFacts.BracketNameIfNecessary(databaseName, KustoDialect.EngineCommand);
+        var result = await connection.ExecuteAsync<DatabaseSchemaResult>(
+            $".show database {escapedDatabaseName} schema as json",
+            cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+        var schemaText = result.Values?.FirstOrDefault()?.DatabaseSchema;
+        if (string.IsNullOrWhiteSpace(schemaText))
+            return null;
+
+        var root = JObject.Parse(schemaText);
+        var databases = root["Databases"] as JObject;
+        var database = databases?.GetValue(databaseName, StringComparison.OrdinalIgnoreCase)
+            ?? databases?.Properties().FirstOrDefault()?.Value;
+        if (database == null)
+            return null;
+
+        return new DatabaseInfo
+        {
+            Name = database.Value<string>("Name") ?? databaseName,
+            AlternateName = database.Value<string>("PrettyName"),
+            Tables = CreateTablesFromDatabaseSchema(database),
+            Functions = CreateFunctionsFromDatabaseSchema(database)
+        };
+    }
+
+    private static ImmutableList<TableInfo> CreateTablesFromDatabaseSchema(JToken database)
+    {
+        if (database["Tables"] is not JObject tables)
+            return ImmutableList<TableInfo>.Empty;
+
+        return tables.Properties()
+            .Select(table =>
+            {
+                var tableSchema = table.Value;
+                var columns = tableSchema["OrderedColumns"] is JArray orderedColumns
+                    ? orderedColumns
+                        .Select(column => new ColumnInfo
+                        {
+                            Name = column.Value<string>("Name") ?? "",
+                            Type = GetKustoTypeName(column.Value<string>("Type"))
+                        })
+                        .Where(column => column.Name.Length > 0)
+                        .ToImmutableList()
+                    : ImmutableList<ColumnInfo>.Empty;
+
+                return new TableInfo
+                {
+                    Name = tableSchema.Value<string>("Name") ?? table.Name,
+                    Columns = columns,
+                    Description = tableSchema.Value<string>("DocString"),
+                    Folder = tableSchema.Value<string>("Folder")
+                };
+            })
+            .ToImmutableList();
+    }
+
+    private static ImmutableList<FunctionInfo> CreateFunctionsFromDatabaseSchema(JToken database)
+    {
+        if (database["Functions"] is not JObject functions)
+            return ImmutableList<FunctionInfo>.Empty;
+
+        return functions.Properties()
+            .Select(function =>
+            {
+                var functionSchema = function.Value;
+                return new FunctionInfo
+                {
+                    Name = functionSchema.Value<string>("Name") ?? function.Name,
+                    Parameters = CreateFunctionParameters(functionSchema),
+                    Body = functionSchema.Value<string>("Body") ?? "",
+                    Description = functionSchema.Value<string>("DocString"),
+                    Folder = functionSchema.Value<string>("Folder")
+                };
+            })
+            .ToImmutableList();
+    }
+
+    private static string CreateFunctionParameters(JToken functionSchema)
+    {
+        if (functionSchema["InputParameters"] is not JArray parameters)
+            return functionSchema.Value<string>("Parameters") ?? "()";
+
+        return "(" + string.Join(", ", parameters.Select(parameter =>
+        {
+            var name = parameter.Value<string>("Name") ?? "";
+            var type = GetKustoTypeName(parameter.Value<string>("Type"));
+            return $"{KustoFacts.BracketNameIfNecessary(name)}:{type}";
+        }).Where(parameter => !parameter.StartsWith(":", StringComparison.Ordinal))) + ")";
+    }
+
+    private static string GetKustoTypeName(string? typeName)
+    {
+        var name = typeName?.StartsWith("System.", StringComparison.OrdinalIgnoreCase) == true
+            ? typeName["System.".Length..]
+            : typeName;
+        return name?.ToLowerInvariant() switch
+        {
+            "boolean" => "bool",
+            "byte" or "sbyte" or "int16" or "uint16" or "int32" => "int",
+            "uint32" or "int64" or "uint64" => "long",
+            "single" or "double" => "real",
+            "decimal" => "decimal",
+            "datetime" => "datetime",
+            "timespan" => "timespan",
+            "guid" => "guid",
+            "object" => "dynamic",
+            "string" => "string",
+            _ => "dynamic"
         };
     }
 
@@ -520,6 +659,11 @@ public class ServerSchemaSource : ISchemaSource
     {
         public string DatabaseName;
         public string PrettyName;
+    }
+
+    public class DatabaseSchemaResult
+    {
+        public string DatabaseSchema;
     }
 
     public class LoadGraphModelSnapshotsResult

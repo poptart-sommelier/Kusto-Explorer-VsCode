@@ -266,7 +266,7 @@ public class DocumentManager : IDocumentManager
 
             foreach (var clusterName in referencedClusterNames)
             {
-                var cluster = globals.GetCluster(clusterName);
+                var cluster = ConnectionFacts.GetClusterSymbol(globals, clusterName);
                 if (cluster == null || cluster.IsOpen)
                 {
                     await _symbolManager.EnsureClustersAsync([clusterName], contextCluster, cancellationToken).ConfigureAwait(false);
@@ -283,7 +283,9 @@ public class DocumentManager : IDocumentManager
             {
                 var cluster = string.IsNullOrEmpty(dbRef.Cluster)
                     ? globals.Cluster
-                    : globals.GetCluster(ConnectionFacts.GetClusterName(dbRef.Cluster, globals.Domain));
+                    : ConnectionFacts.GetClusterSymbol(
+                        globals,
+                        ConnectionFacts.GetClusterName(dbRef.Cluster, globals.Domain));
 
                 // don't rely on the user to do the right thing.
                 if (cluster == null
@@ -364,7 +366,7 @@ public class DocumentManager : IDocumentManager
             newGlobals = newGlobals.WithCluster(Language.Symbols.ClusterSymbol.Unknown);
         }
         else if (info.Cluster != null
-            && newGlobals.GetCluster(info.Cluster) is { } clusterSymbol
+            && ConnectionFacts.GetClusterSymbol(newGlobals, info.Cluster) is { } clusterSymbol
             && newGlobals.Cluster != clusterSymbol)
         {
             newGlobals = newGlobals.WithCluster(clusterSymbol);

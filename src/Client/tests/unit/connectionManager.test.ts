@@ -121,6 +121,50 @@ describe('ConnectionManager', () => {
             expect(data.items).toEqual([]);
         });
 
+        describe('database selection', () => {
+            it('uses the scoped Log Analytics workspace without querying server metadata', async () => {
+                const cluster = 'https://ade.loganalytics.io/subscriptions/sub/resourceGroups/rg/providers/'
+                    + 'microsoft.operationalinsights/workspaces/workspace%20one';
+
+                const databases = await mgr.getDatabasesForCluster(cluster);
+
+                expect(databases).toEqual(['workspace one']);
+                expect(server.getServerInfo).not.toHaveBeenCalled();
+            });
+
+            it('caches the scoped workspace for the connection tree', async () => {
+                const cluster = 'https://ade.loganalytics.io/subscriptions/sub/resourceGroups/rg/providers/'
+                    + 'microsoft.operationalinsights/workspaces/workspace-one';
+
+                await mgr.fetchDatabasesForCluster(cluster);
+
+                expect(mgr.getClusterDatabases(cluster)).toEqual([{ name: 'workspace-one' }]);
+                expect(server.getServerInfo).not.toHaveBeenCalled();
+            });
+
+            it('uses the scoped Application Insights component without querying server metadata', async () => {
+                const cluster = 'https://ade.applicationinsights.io/subscriptions/sub/resourceGroups/rg/providers/'
+                    + 'microsoft.insights/components/component-one';
+
+                const databases = await mgr.getDatabasesForCluster(cluster);
+
+                expect(databases).toEqual(['component-one']);
+                expect(server.getServerInfo).not.toHaveBeenCalled();
+            });
+
+            it('loads databases from the server for a regular Kusto cluster', async () => {
+                server.getServerInfo = vi.fn(async () => ({
+                    cluster: 'help.kusto.windows.net',
+                    databases: [{ name: 'Samples', alternateName: 'Samples' }],
+                }));
+
+                const databases = await mgr.getDatabasesForCluster('help.kusto.windows.net');
+
+                expect(databases).toEqual(['Samples']);
+                expect(server.getServerInfo).toHaveBeenCalledOnce();
+            });
+        });
+
         it('addServer adds a root-level server', async () => {
             await mgr.addServer(makeServer('cluster1.kusto.windows.net'));
 
@@ -374,6 +418,47 @@ describe('ConnectionManager', () => {
 
             expect(mgr.getSavedDocumentConnection('file:///a.kql')?.cluster).toBe('c1');
             expect(mgr.getSavedDocumentConnection('file:///b.kql')?.cluster).toBe('c2');
+        });
+
+        it('uses transient notebook-cell connections without persisting them', async () => {
+            const uri = 'vscode-notebook-cell:///investigation.kqlnb#cell-1';
+
+            await mgr.setTransientDocumentConnection(uri, 'c.kusto.windows.net', 'db');
+
+            expect(await mgr.getDocumentConnection(uri)).toMatchObject({
+                cluster: 'c.kusto.windows.net',
+                database: 'db',
+            });
+            expect(mgr.hasSavedDocumentConnection(uri)).toBe(false);
+            expect(context.workspaceState.update).not.toHaveBeenCalled();
+            expect(server.sendDocumentConnectionChanged).toHaveBeenCalledWith(
+                uri, 'c.kusto.windows.net', 'db', null,
+            );
+        });
+
+        it('clears transient notebook-cell connections', async () => {
+            const uri = 'vscode-notebook-cell:///investigation.kqlnb#cell-1';
+            await mgr.setTransientDocumentConnection(uri, 'c.kusto.windows.net', 'db');
+
+            await mgr.clearTransientDocumentConnection(uri);
+
+            expect(await mgr.getDocumentConnection(uri)).toBeUndefined();
+            expect(server.sendDocumentConnectionChanged).toHaveBeenLastCalledWith(
+                uri, null, null, null,
+            );
+        });
+
+        it('resends an unchanged transient connection after a language server restart', async () => {
+            const uri = 'vscode-notebook-cell:///investigation.kqlnb#cell-1';
+            await mgr.setTransientDocumentConnection(uri, 'c.kusto.windows.net', 'db');
+            vi.mocked(server.sendDocumentConnectionChanged).mockClear();
+
+            await mgr.setTransientDocumentConnection(uri, 'c.kusto.windows.net', 'db');
+
+            expect(server.sendDocumentConnectionChanged).toHaveBeenCalledOnce();
+            expect(server.sendDocumentConnectionChanged).toHaveBeenCalledWith(
+                uri, 'c.kusto.windows.net', 'db', null,
+            );
         });
     });
 

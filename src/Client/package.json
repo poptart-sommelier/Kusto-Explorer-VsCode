@@ -20,6 +20,8 @@
   ],
   "activationEvents": [
     "onLanguage:kusto",
+    "onNotebook:msKustoExplorer.kqlNotebook",
+    "onCommand:msKustoExplorer.newNotebook",
     "onFileSystem:msKustoExplorer-scratch",
     "onLanguageModelTool:msKustoExplorer_getClusters",
     "onChatParticipant:msKustoExplorer"
@@ -108,6 +110,17 @@
           }
         ],
         "priority": "default"
+      }
+    ],
+    "notebooks": [
+      {
+        "type": "msKustoExplorer.kqlNotebook",
+        "displayName": "Kusto Notebook",
+        "selector": [
+          {
+            "filenamePattern": "*.kqlnb"
+          }
+        ]
       }
     ],
     "commands": [
@@ -319,6 +332,16 @@
         "command": "msKustoExplorer.rerunQuery",
         "title": "Rerun Query",
         "icon": "$(play)"
+      },
+      {
+        "command": "msKustoExplorer.newNotebook",
+        "title": "New Kusto Notebook",
+        "icon": "$(notebook)"
+      },
+      {
+        "command": "msKustoExplorer.selectNotebookConnection",
+        "title": "Select Notebook Connection",
+        "icon": "$(database)"
       }
     ],
     "menus": {
@@ -326,6 +349,13 @@
         {
           "command": "msKustoExplorer.runQuery.running",
           "when": "false"
+        }
+      ],
+      "notebook/toolbar": [
+        {
+          "command": "msKustoExplorer.selectNotebookConnection",
+          "when": "notebookType == msKustoExplorer.kqlNotebook",
+          "group": "navigation@10"
         }
       ],
       "view/title": [

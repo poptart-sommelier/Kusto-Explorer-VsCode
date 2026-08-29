@@ -38,6 +38,7 @@ public interface IQueryManager
         ImmutableDictionary<string, string> queryOptions,
         ImmutableDictionary<string, string> queryParameters,
         string? clientRequestId,
+        long? hardMaxRows,
         CancellationToken cancellationToken
         );
 }

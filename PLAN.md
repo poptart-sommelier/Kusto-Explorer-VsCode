@@ -13,6 +13,11 @@ contracts, adds repeatable 100,000-row server and client baseline tools, records
 budgets, and documents the planned ownership and lifecycle seams in `ARCHITECTURE.md`. The contracts
 are not wired to runtime handlers until the scalable result-session implementation begins.
 
+Phase 2 was implemented on August 28, 2026. Native `.kqlnb` files now support KQL and Markdown cells,
+connection selection, sequential execution, cancellation, execution ordering, and inline text
+results. Until Phase 3 replaces whole-result transport, notebook queries and rendered previews use
+explicit temporary safety limits described below.
+
 ## Goals
 
 The new workflow must make it practical to:

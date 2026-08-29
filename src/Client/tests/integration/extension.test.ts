@@ -31,4 +31,14 @@ suite('Extension Integration Tests', () => {
         const editor = await vscode.window.showTextDocument(doc);
         assert.ok(editor, 'Should be able to show a kusto document in an editor');
     });
+
+    test('Can create a native Kusto notebook', async () => {
+        await vscode.commands.executeCommand('msKustoExplorer.newNotebook');
+
+        const editor = vscode.window.activeNotebookEditor;
+        assert.ok(editor, 'Expected the new notebook to be visible');
+        assert.strictEqual(editor.notebook.notebookType, 'msKustoExplorer.kqlNotebook');
+        assert.strictEqual(editor.notebook.cellCount, 1);
+        assert.strictEqual(editor.notebook.cellAt(0).document.languageId, 'kusto');
+    });
 });

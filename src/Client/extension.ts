@@ -25,6 +25,10 @@ import { ImportManager } from './features/importManager'
 import { EntityDefinitionProvider, ENTITY_DEFINITION_SCHEME } from './features/entityDefinitionProvider'
 import { Server, NullServer } from './features/server'
 import type { IServer } from './features/server'
+import { KustoNotebookSerializer } from './features/kustoNotebookSerializer'
+import { KustoNotebookManager } from './features/kustoNotebookManager'
+import { KustoNotebookController } from './features/kustoNotebookController'
+import { KUSTO_NOTEBOOK_TYPE } from './features/notebookFormat'
 import
     {
         LanguageClient,
@@ -61,7 +65,8 @@ export async function activate(context: ExtensionContext)
             documentSelector: [
                 { scheme: 'file', language: 'kusto' },
                 { scheme: ENTITY_DEFINITION_SCHEME, language: 'kusto' },
-                { scheme: SCRATCH_PAD_SCHEME, language: 'kusto' }
+                { scheme: SCRATCH_PAD_SCHEME, language: 'kusto' },
+                { scheme: 'vscode-notebook-cell', language: 'kusto' }
             ],
             synchronize: { 
                 fileEvents: workspace.createFileSystemWatcher('**/*.{kql,csl,kusto}')
@@ -157,6 +162,31 @@ export async function activate(context: ExtensionContext)
     // activate connections data layer
     const connectionManager = new ConnectionManager(context, server);
 
+    // activate native Kusto notebooks
+    const notebookManager = new KustoNotebookManager(context, connectionManager);
+    const notebookController = new KustoNotebookController(server, connectionManager, notebookManager);
+    context.subscriptions.push(
+        vscode.workspace.registerNotebookSerializer(
+            KUSTO_NOTEBOOK_TYPE,
+            new KustoNotebookSerializer(),
+            { transientOutputs: true },
+        ),
+        notebookController,
+        vscode.commands.registerCommand(
+            'msKustoExplorer.newNotebook',
+            () => notebookManager.createNotebook(),
+        ),
+        vscode.commands.registerCommand(
+            'msKustoExplorer.selectNotebookConnection',
+            async () => {
+                const notebook = vscode.window.activeNotebookEditor?.notebook;
+                if (notebook?.notebookType === KUSTO_NOTEBOOK_TYPE) {
+                    await notebookController.selectConnection(notebook);
+                }
+            },
+        ),
+    );
+
     // activate scratch pad documents
     const scratchPadPanel = new ScratchPadPanel(context, scratchPadManager, connectionManager);
     context.subscriptions.push(
@@ -230,7 +260,7 @@ export async function activate(context: ExtensionContext)
     copilot.activate(context, server, connectionManager, resultsViewer);
 
     // Expose internal components for integration tests
-    return { historyManager, connectionManager, resultsViewer, server };
+    return { historyManager, connectionManager, resultsViewer, notebookManager, notebookController, server };
 }
 
 export function deactivate(): Thenable<void> | undefined

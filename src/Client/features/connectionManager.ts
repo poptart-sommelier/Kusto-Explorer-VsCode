@@ -116,6 +116,34 @@ function isAzureMonitorProxyHost(hostname: string): boolean {
         || hostname === 'adx.monitor.azure.cn';
 }
 
+function getAzureMonitorResourceDatabase(cluster: string): string | undefined {
+    try {
+        const url = new URL(cluster);
+        if (!isAzureMonitorProxyHost(url.hostname)) {
+            return undefined;
+        }
+
+        const segments = url.pathname.split('/').filter(Boolean);
+        if (segments.length < 4 || segments[segments.length - 4]?.toLowerCase() !== 'providers') {
+            return undefined;
+        }
+
+        const provider = segments[segments.length - 3]?.toLowerCase();
+        const resourceType = segments[segments.length - 2]?.toLowerCase();
+        const isWorkspace = provider === 'microsoft.operationalinsights'
+            && resourceType === 'workspaces';
+        const isComponent = provider === 'microsoft.insights'
+            && resourceType === 'components';
+        if (!isWorkspace && !isComponent) {
+            return undefined;
+        }
+
+        return decodeURIComponent(segments[segments.length - 1]!);
+    } catch {
+        return undefined;
+    }
+}
+
 /**
  * Gets the suggested display name for a cluster.
  * If the cluster ends with the configured default domain, returns the short name;
@@ -146,6 +174,7 @@ export class ConnectionManager {
     private readonly documentConnectionChangedListeners: ((uri: string) => Promise<void>)[] = [];
     private readonly serversAndGroupsChangedListeners: (() => void)[] = [];
     private readonly documentConnections = new Map<string, DocumentConnection>();
+    private readonly transientDocumentConnections = new Map<string, DocumentConnection>();
     private serversAndGroups: ServersAndGroupsData = { items: [] };
     // Array with linear search. Cluster count is small (typically <20) so Map overhead isn't warranted.
     private clusterConnections: { cluster: string, connection: string, databases?: DatabaseInfo[] }[] = [];
@@ -600,14 +629,8 @@ export class ConnectionManager {
      */
     async fetchDatabasesForCluster(clusterName: string): Promise<void> {
         try {
-            const serverInfo = this.findServerInfo(clusterName);
-            const serverKind = serverInfo?.serverKind ?? null;
-            const result = await this.server.getServerInfo(clusterName, serverKind);
-
-            if (result && result.databases) {
-                const databases = result.databases.map(db => ({ name: db.name }));
-                this.setClusterDatabases(clusterName, databases);
-            }
+            const databases = await this.getDatabasesForCluster(clusterName);
+            this.setClusterDatabases(clusterName, databases.map(name => ({ name })));
         } catch (error) {
             console.error(`Failed to get server info for ${clusterName}:`, error);
             vscode.window.showErrorMessage(`Failed to load databases for ${clusterName}`);
@@ -754,6 +777,11 @@ export class ConnectionManager {
      * @param uri The document URI
      */
     async getDocumentConnection(uri: string): Promise<DocumentConnection | undefined> {
+        const transient = this.transientDocumentConnections.get(uri);
+        if (transient) {
+            return transient;
+        }
+
         const saved = this.documentConnections.get(uri);
         
         // If saved is "no connection" (has entry but no cluster), return undefined without inferring
@@ -793,6 +821,8 @@ export class ConnectionManager {
      * - If the connection matches the inferred connection, it is removed from saved (will be inferred)
      */
     async setDocumentConnection(uri: string, cluster: string | undefined, database: string | undefined): Promise<void> {
+        this.transientDocumentConnections.delete(uri);
+
         // Check if the connection matches the inferred connection
         let matchesInferred = false;
         if (cluster) {
@@ -834,6 +864,34 @@ export class ConnectionManager {
 
         // Notify server of the connection change
         this.server.sendDocumentConnectionChanged(uri, cluster || null, database || null, serverKind);
+    }
+
+    /**
+     * Associates an open virtual document, such as a notebook cell, without
+     * persisting its generated URI in workspace state.
+     */
+    async setTransientDocumentConnection(uri: string, cluster: string, database: string | undefined): Promise<void> {
+        const current = this.transientDocumentConnections.get(uri);
+        if (current?.cluster !== cluster || current.database !== database) {
+            this.transientDocumentConnections.set(uri, { uri, cluster, database });
+            await this.raiseDocumentConnectionChanged(uri);
+        }
+
+        // Re-send unchanged transient state in case the language server restarted.
+        const serverKind = this.findServerInfo(cluster)?.serverKind ?? null;
+        this.server.sendDocumentConnectionChanged(uri, cluster, database ?? null, serverKind);
+    }
+
+    /**
+     * Removes a virtual document connection when its owning notebook closes.
+     */
+    async clearTransientDocumentConnection(uri: string): Promise<void> {
+        if (!this.transientDocumentConnections.delete(uri)) {
+            return;
+        }
+
+        await this.raiseDocumentConnectionChanged(uri);
+        this.server.sendDocumentConnectionChanged(uri, null, null, null);
     }
 
     // =========================================================================
@@ -898,6 +956,11 @@ export class ConnectionManager {
      * @returns Promise resolving to array of database names
      */
     async getDatabasesForCluster(cluster: string): Promise<string[]> {
+        const resourceDatabase = getAzureMonitorResourceDatabase(cluster);
+        if (resourceDatabase) {
+            return [resourceDatabase];
+        }
+
         try {
             const serverInfo = this.findServerInfo(cluster);
             const serverKind = serverInfo?.serverKind ?? null;

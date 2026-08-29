@@ -83,7 +83,7 @@ public class SymbolManager : ISymbolManager
         {
             var newGlobals = this.Globals;
 
-            var clusterSymbol = newGlobals.GetCluster(clusterName);
+            var clusterSymbol = ConnectionFacts.GetClusterSymbol(newGlobals, clusterName);
             if (clusterSymbol != null && !clusterSymbol.IsOpen)
             {
                 if (databaseName == null)
@@ -142,11 +142,11 @@ public class SymbolManager : ISymbolManager
 
             try
             {
-                var clusterSymbol = globals.GetCluster(clusterName);
+                var clusterSymbol = ConnectionFacts.GetClusterSymbol(globals, clusterName);
                 if (clusterSymbol == null || clusterSymbol.IsOpen)
                 {
                     globals = await this.AddClusterAsync(globals, clusterName, contextCluster, useThisCancellationToken).ConfigureAwait(false);
-                    clusterSymbol = globals.GetCluster(clusterName);
+                    clusterSymbol = ConnectionFacts.GetClusterSymbol(globals, clusterName);
                 }
 
                 if (clusterSymbol != null)
@@ -169,7 +169,7 @@ public class SymbolManager : ISymbolManager
 
     private async Task<GlobalState> AddClusterAsync(GlobalState globals, string clusterName, string? contextCluster, CancellationToken cancellationToken)
     {
-        var clusterSymbol = globals.GetCluster(clusterName);
+        var clusterSymbol = ConnectionFacts.GetClusterSymbol(globals, clusterName);
         if (clusterSymbol == null || clusterSymbol.IsOpen)
         {
             var clusterInfo = await _schemaManager.GetClusterInfoAsync(clusterName, contextCluster, cancellationToken).ConfigureAwait(false);
@@ -192,7 +192,7 @@ public class SymbolManager : ISymbolManager
 
     private async Task<GlobalState> AddDatabaseAsync(GlobalState globals, string clusterName, string databaseName, string? contextCluster, CancellationToken cancellationToken)
     {
-        var clusterSymbol = globals.GetCluster(clusterName);
+        var clusterSymbol = ConnectionFacts.GetClusterSymbol(globals, clusterName);
         if (clusterSymbol != null)
         {
             var databaseSymbol = clusterSymbol.GetDatabase(databaseName);
@@ -232,7 +232,7 @@ public class SymbolManager : ISymbolManager
             {
                 try
                 {
-                    var clusterSymbol = globals.GetCluster(clusterName);
+                    var clusterSymbol = ConnectionFacts.GetClusterSymbol(globals, clusterName);
                     if (clusterSymbol == null)
                     {
                         _logger?.Log($"SymbolManager: Ensuring cluster symbol for '{clusterName}'");

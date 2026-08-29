@@ -253,8 +253,31 @@ product and delivery decisions are recorded in [PLAN.md](PLAN.md).
 The notebook file format is versioned independently of the extension. Version 1 stores ordered KQL
 and Markdown cells plus non-secret connection metadata. It deliberately has no serialized output
 field, so saving a notebook cannot accidentally persist result rows or credentials. The TypeScript
-contract and validator live in `features/notebookFormat.ts`; the serializer and notebook controller
-are Phase 2 work.
+contract and validator live in `features/notebookFormat.ts`.
+
+The Phase 2 native notebook shell consists of:
+
+- `kustoNotebookSerializer.ts` — converts version 1 `.kqlnb` JSON to native notebook cells and
+  deliberately omits outputs and execution summaries when saving.
+- `kustoNotebookManager.ts` — creates notebooks, stores the selected non-secret connection in
+  notebook metadata, synchronizes that connection to open cell documents, and builds bounded text
+  previews.
+- `kustoNotebookController.ts` — runs KQL cells sequentially through the existing `IServer.runQuery`
+  seam, supplies native progress/execution ordering, passes cancellation to JSON-RPC, and creates
+  inline output.
+
+KQL notebook cells use the `vscode-notebook-cell` document scheme in the language-client selector,
+so they receive the same completion, diagnostics, formatting, hover, and navigation services as
+`.kql` files. Notebook-cell connection assignments are transient: `ConnectionManager` reports them
+to the language server but does not persist generated cell URIs in workspace storage. The notebook's
+own connection metadata remains the durable source.
+
+Until Phase 3 implements result sessions and a virtualized renderer, the shell requests no more than
+1,000 rows and renders no more than 2,000,000 text characters. Every successful cell displays the row
+limit notice, and oversized text previews display a truncation notice. These explicit safety limits
+avoid reproducing the unbounded current results path inside native notebook output. The row cap is
+enforced in `QueryManager` after client-request-property directives are applied, so a `#crp`
+directive cannot raise it.
 
 Large notebook results must not follow the existing whole-result path. The planned ownership model
 is:

@@ -1938,14 +1938,14 @@ public class Server : LspServer, ILogger, ISettingSource, IStorage, IAuthenticat
             {
                 await _symbolManager.EnsureClustersAsync([@params.Cluster], contextCluster: null, cancellationToken).ConfigureAwait(false);
                 globals = _symbolManager.Globals;
-                if (globals.GetCluster(@params.Cluster) is { } clusterSymbol)
+                if (ConnectionFacts.GetClusterSymbol(globals, @params.Cluster) is { } clusterSymbol)
                 {
                     globals = globals.WithCluster(clusterSymbol);
                     if (@params.Database != null)
                     {
                         await _symbolManager.EnsureDatabaseAsync(@params.Cluster, @params.Database, contextCluster: null, cancellationToken).ConfigureAwait(false);
                         globals = _symbolManager.Globals;
-                        clusterSymbol = globals.GetCluster(@params.Cluster);
+                        clusterSymbol = ConnectionFacts.GetClusterSymbol(globals, @params.Cluster);
                         if (clusterSymbol?.GetDatabase(@params.Database) is { } databaseSymbol)
                         {
                             globals = globals.WithCluster(clusterSymbol).WithDatabase(databaseSymbol);
@@ -2068,6 +2068,7 @@ public class Server : LspServer, ILogger, ISettingSource, IStorage, IAuthenticat
                 queryOptions,
                 queryParameters,
                 clientRequestId: @params.ClientRequestId,
+                hardMaxRows: @params.HardMaxRows,
                 cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
 
@@ -2131,6 +2132,9 @@ public class Server : LspServer, ILogger, ISettingSource, IStorage, IAuthenticat
 
         [DataMember(Name = "clientRequestId")]
         public string? ClientRequestId { get; init; }
+
+        [DataMember(Name = "hardMaxRows")]
+        public long? HardMaxRows { get; init; }
     }
 
     [DataContract]
@@ -2166,14 +2170,14 @@ public class Server : LspServer, ILogger, ISettingSource, IStorage, IAuthenticat
             {
                 await _symbolManager.EnsureClustersAsync([@params.Cluster], contextCluster: null, cancellationToken).ConfigureAwait(false);
                 globals = _symbolManager.Globals;
-                if (globals.GetCluster(@params.Cluster) is { } clusterSymbol)
+                if (ConnectionFacts.GetClusterSymbol(globals, @params.Cluster) is { } clusterSymbol)
                 {
                     globals = globals.WithCluster(clusterSymbol);
                     if (@params.Database != null)
                     {
                         await _symbolManager.EnsureDatabaseAsync(@params.Cluster, @params.Database, contextCluster: null, cancellationToken).ConfigureAwait(false);
                         globals = _symbolManager.Globals;
-                        clusterSymbol = globals.GetCluster(@params.Cluster);
+                        clusterSymbol = ConnectionFacts.GetClusterSymbol(globals, @params.Cluster);
                         if (clusterSymbol != null)
                         {
                             globals = globals.WithCluster(clusterSymbol);
@@ -2686,5 +2690,3 @@ public class Server : LspServer, ILogger, ISettingSource, IStorage, IAuthenticat
 
     #endregion
 }
-
-

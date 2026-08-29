@@ -34,7 +34,6 @@ export class ConnectionsPanel {
     private isTreeSelectionChangingConnection = false;
     private isFetchingDatabasesForTreeUpdate = false;
     private isDragging = false;
-    private lastValidSelection: KustoTreeItem | undefined;
 
     constructor(
         context: vscode.ExtensionContext,
@@ -143,25 +142,14 @@ export class ConnectionsPanel {
 
             const selected = event.selection[0];
 
-            // Only allow selection of connectable items (server, database, no-connection)
-            const isSelectableItem = selected instanceof NoConnectionTreeItem
+            // Entity rows remain selected for inspection, but only these rows change connections.
+            const changesConnection = selected instanceof NoConnectionTreeItem
                 || selected instanceof ServerTreeItem
                 || selected instanceof DatabaseTreeItem;
 
-            if (!isSelectableItem) {
-                // Revert to the last valid selection
-                if (this.lastValidSelection) {
-                    try {
-                        await this.programmaticSelectTreeItem(this.lastValidSelection, { select: true, focus: false, expand: false });
-                    } catch {
-                        // Silently ignore reveal errors
-                    }
-                }
+            if (!changesConnection) {
                 return;
             }
-
-
-            this.lastValidSelection = selected;
 
             const editor = vscode.window.activeTextEditor;
             if (!editor || editor.document.languageId !== 'kusto') {
@@ -545,7 +533,6 @@ export class ConnectionsPanel {
             if (noConnectionItem) {
                 try {
                     await this.programmaticSelectTreeItem(noConnectionItem, { select: true, focus: false, expand: false });
-                    this.lastValidSelection = noConnectionItem;
                 } catch {
                     // Silently ignore reveal errors
                 }
@@ -582,7 +569,6 @@ export class ConnectionsPanel {
                     const currentEditor = vscode.window.activeTextEditor;
                     if (currentEditor && currentEditor.document.languageId === 'kusto') {
                         await this.programmaticSelectTreeItem(itemToSelect, { select: true, focus: false, expand: false });
-                        this.lastValidSelection = itemToSelect;
                     }
                 } catch {
                     // Silently ignore reveal errors

@@ -19,10 +19,76 @@ public class ServerSchemaSourceTests
 {
     private const string TestCluster = "testcluster.kusto.windows.net";
     private const string TestDatabase = "testdb";
+    private const string MonitorCluster = "https://ade.loganalytics.io/subscriptions/sub/resourcegroups/rg/"
+        + "providers/microsoft.operationalinsights/workspaces/workspace-one";
 
     // A minimal but valid GraphModel JSON. The parser uses Newtonsoft.Json to
     // deserialize directly into the GraphModel type; an empty object suffices.
     private const string ValidGraphModelContent = "{}";
+
+    [TestMethod]
+    public async Task GetClusterInfoAsync_ScopedMonitorResource_UsesResourceAsOnlyDatabase()
+    {
+        var connection = new TestConnection(MonitorCluster, "workspace-one");
+        var source = new ServerSchemaSource(new TestConnectionManager(connection), logger: null);
+
+        var info = await source.GetClusterInfoAsync(MonitorCluster, null, CancellationToken.None);
+
+        Assert.IsNotNull(info);
+        Assert.HasCount(1, info.Databases);
+        Assert.AreEqual("workspace-one", info.Databases[0].Name);
+        Assert.IsEmpty(connection.Queries);
+    }
+
+    [TestMethod]
+    public async Task GetDatabaseInfoAsync_ScopedMonitorResource_LoadsSupportedJsonSchema()
+    {
+        var connection = new TestConnection(MonitorCluster, "workspace-one")
+        {
+            DatabaseSchemaResult = ImmutableList.Create(
+                new ServerSchemaSource.DatabaseSchemaResult
+                {
+                    DatabaseSchema =
+                        """
+                        {
+                          "Databases": {
+                            "workspace-one": {
+                              "Name": "workspace-one",
+                              "PrettyName": null,
+                              "Tables": {
+                                "DeviceProcessEvents": {
+                                  "Name": "DeviceProcessEvents",
+                                  "OrderedColumns": [
+                                    { "Name": "Timestamp", "Type": "System.DateTime" },
+                                    { "Name": "DeviceName", "Type": "System.String" },
+                                    { "Name": "ReportId", "Type": "System.Int64" }
+                                  ]
+                                }
+                              },
+                              "Functions": {}
+                            }
+                          }
+                        }
+                        """
+                })
+        };
+        var source = new ServerSchemaSource(new TestConnectionManager(connection), logger: null);
+
+        var info = await source.GetDatabaseInfoAsync(
+            MonitorCluster,
+            "workspace-one",
+            null,
+            CancellationToken.None);
+
+        Assert.IsNotNull(info);
+        Assert.HasCount(1, info.Tables);
+        Assert.AreEqual("DeviceProcessEvents", info.Tables[0].Name);
+        CollectionAssert.AreEqual(
+            new[] { "datetime", "string", "long" },
+            info.Tables[0].Columns.Select(column => column.Type).ToArray());
+        Assert.HasCount(1, connection.Queries);
+        StringAssert.Contains(connection.Queries[0], "schema as json");
+    }
 
     [TestMethod]
     public async Task GetGraphModelInfosAsync_NoSnapshotData_LoadsGraphModel()
@@ -236,6 +302,11 @@ public class ServerSchemaSourceTests
         public ImmutableList<ServerSchemaSource.DatabaseNamesResult> DatabaseIdentityResult { get; set; }
             = ImmutableList<ServerSchemaSource.DatabaseNamesResult>.Empty;
 
+        public ImmutableList<ServerSchemaSource.DatabaseSchemaResult> DatabaseSchemaResult { get; set; }
+            = ImmutableList<ServerSchemaSource.DatabaseSchemaResult>.Empty;
+
+        public List<string> Queries { get; } = [];
+
         public IConnection WithCluster(string clusterName) => this;
         public IConnection WithDatabase(string databaseName) => this;
 
@@ -255,6 +326,7 @@ public class ServerSchemaSourceTests
             ImmutableDictionary<string, string>? parameters = null,
             CancellationToken cancellationToken = default)
         {
+            Queries.Add(query.ToString());
             object? values = null;
 
             if (typeof(T) == typeof(DatabasesEntitiesShowCommandResult))
@@ -268,6 +340,10 @@ public class ServerSchemaSourceTests
             else if (typeof(T) == typeof(ServerSchemaSource.DatabaseNamesResult))
             {
                 values = DatabaseIdentityResult;
+            }
+            else if (typeof(T) == typeof(ServerSchemaSource.DatabaseSchemaResult))
+            {
+                values = DatabaseSchemaResult;
             }
 
             var result = new ExecuteResult<T>

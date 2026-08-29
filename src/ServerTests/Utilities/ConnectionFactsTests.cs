@@ -2,6 +2,8 @@
 // Licensed under the MIT license.
 
 using Kusto.Vscode;
+using Kusto.Language;
+using Kusto.Language.Symbols;
 
 namespace Tests.Utilities;
 
@@ -81,6 +83,19 @@ public class ConnectionFactsTests
             "NetDefaultDB");
 
         Assert.AreEqual("NetDefaultDB", result);
+    }
+
+    [TestMethod]
+    public void GetClusterSymbol_ScopedMonitorCluster_FindsExactIdentity()
+    {
+        var database = new DatabaseSymbol("ws");
+        var cluster = new ClusterSymbol(LogAnalyticsUri, [database]);
+        var globals = GlobalState.Default.AddOrReplaceCluster(cluster);
+
+        Assert.AreSame(cluster, ConnectionFacts.GetClusterSymbol(globals, LogAnalyticsUri));
+        Assert.AreSame(
+            database,
+            ConnectionFacts.GetClusterSymbol(globals, LogAnalyticsUri)?.GetDatabase("ws"));
     }
 
     #endregion

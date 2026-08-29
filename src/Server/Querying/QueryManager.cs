@@ -44,24 +44,28 @@ public class QueryManager : IQueryManager
 
     private async Task<GlobalState> GetGlobalsAsync(string? clusterName, string? databaseName, CancellationToken cancellationToken)
     {
-        var globals = _symbolManager.Globals;
         if (clusterName != null)
         {
             await _symbolManager.EnsureClustersAsync([clusterName], contextCluster: null, cancellationToken).ConfigureAwait(false);
-            if (globals.GetCluster(clusterName) is { } clusterSymbol)
+            var globals = _symbolManager.Globals;
+            if (ConnectionFacts.GetClusterSymbol(globals, clusterName) is { } clusterSymbol)
             {
                 globals = globals.WithCluster(clusterSymbol);
                 if (databaseName != null)
                 {
                     await _symbolManager.EnsureDatabaseAsync(clusterName, databaseName, contextCluster: null, cancellationToken).ConfigureAwait(false);
+                    globals = _symbolManager.Globals.WithCluster(
+                        ConnectionFacts.GetClusterSymbol(_symbolManager.Globals, clusterName) ?? clusterSymbol);
+                    clusterSymbol = globals.Cluster;
                     if (clusterSymbol.GetDatabase(databaseName) is { } databaseSymbol)
                     {
                         globals = globals.WithDatabase(databaseSymbol);
                     }
                 }
             }
+            return globals;
         }
-        return globals;
+        return _symbolManager.Globals;
     }
 
     /// <summary>
@@ -135,6 +139,7 @@ public class QueryManager : IQueryManager
         ImmutableDictionary<string, string> queryOptions,
         ImmutableDictionary<string, string> queryParameters,
         string? clientRequestId,
+        long? hardMaxRows,
         CancellationToken cancellationToken)
     {
         var context = new ExecutionContext
@@ -163,6 +168,14 @@ public class QueryManager : IQueryManager
             while (IsDirective(context.Query));
         }
 
+        if (hardMaxRows.HasValue)
+        {
+            context = context with
+            {
+                Options = QueryOptionFacts.EnforceMaximumRows(context.Options, hardMaxRows.Value)
+            };
+        }
+
         var effectiveCluster = context.Cluster ?? clusterName;
         var effectiveDatabase = context.Database ?? databaseName;
 
@@ -186,7 +199,25 @@ public class QueryManager : IQueryManager
                 });
         }
 
-        return ExecuteQueryAsync(connection, context, cancellationToken);
+        return ExecuteQueryWithConnectionAsync(
+            connection,
+            context,
+            cancellationToken);
+    }
+
+    private async Task<RunResult> ExecuteQueryWithConnectionAsync(
+        IConnection connection,
+        ExecutionContext context,
+        CancellationToken cancellationToken)
+    {
+        var result = await ExecuteQueryAsync(connection, context, cancellationToken).ConfigureAwait(false);
+        return result with
+        {
+            Cluster = context.Cluster != null ? connection.Cluster : null,
+            Database = context.Cluster != null || context.Database != null
+                ? connection.Database
+                : null
+        };
     }
 
     private static bool IsDirective(string text)

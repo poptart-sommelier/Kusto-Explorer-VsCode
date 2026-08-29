@@ -15,7 +15,7 @@ import {
  */
 export interface IServer {
     // LSP Requests
-    runQuery(query: string, cluster?: string, database?: string, isReadOnly?: boolean, maxRows?: number, clientRequestId?: string): Promise<RunQueryResult | null>;
+    runQuery(query: string, cluster?: string, database?: string, isReadOnly?: boolean, maxRows?: number, clientRequestId?: string, hardMaxRows?: number, token?: CancellationToken): Promise<RunQueryResult | null>;
     getQueryResultType(query: string, cluster: string, database?: string): Promise<GetQueryResultTypeResult | null>;
     getFunctionResultType(cluster: string, database: string, functionName: string): Promise<GetFunctionResultTypeResult | null>;
     getQueryRanges(uri: string): Promise<QueryRangesResult | null>;
@@ -89,11 +89,14 @@ export class Server implements IServer {
         database?: string,
         isReadOnly?: boolean,
         maxRows?: number,
-        clientRequestId?: string
+        clientRequestId?: string,
+        hardMaxRows?: number,
+        token?: CancellationToken
     ): Promise<RunQueryResult | null> {
         return this.client.sendRequest<RunQueryResult | null>(
             'kusto/runQuery',
-            { query, cluster, database, isReadOnly, maxRows, clientRequestId }
+            { query, cluster, database, isReadOnly, maxRows, clientRequestId, hardMaxRows },
+            token
         );
     }
 
@@ -773,4 +776,3 @@ export interface ValidateQueryResult {
 export interface GetMinifiedQueryResult {
     minifiedQuery?: string;
 }
-

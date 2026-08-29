@@ -6,7 +6,6 @@
  */
 
 import * as vscode from 'vscode';
-import * as crypto from 'crypto';
 import type { IServer, SelectionRange, Range } from './server';
 import type { ConnectionManager } from './connectionManager';
 import { ResultsViewer } from './resultsViewer';
@@ -15,6 +14,7 @@ import type { HistoryEntry } from './historyManager';
 import type { HistoryPanel } from './historyPanel';
 import { formatCfHtml, type ClipboardItem, type IClipboard } from './clipboard';
 import { ENTITY_DEFINITION_SCHEME } from './entityDefinitionProvider';
+import { createClientRequestId } from './clientRequestId';
 
 const PASTE_KIND = vscode.DocumentDropOrPasteEditKind.Text.append('kusto');
 const QUERY_RUNNING_CONTEXT_KEY = 'msKustoExplorer.queryRunning';
@@ -29,10 +29,6 @@ function rangeFromArgs(startLine?: number, startChar?: number, endLine?: number,
         return { start: { line: startLine, character: startChar }, end: { line: endLine, character: endChar } };
     }
     return undefined;
-}
-
-function createClientRequestId(): string {
-    return `KustoExplorerVsCode;${crypto.randomUUID()}`;
 }
 
 function formatRunTimestamp(timestamp: string): string {

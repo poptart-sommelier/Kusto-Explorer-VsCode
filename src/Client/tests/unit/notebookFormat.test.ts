@@ -70,6 +70,13 @@ describe('Kusto notebook format', () => {
         expect(isSerializedKustoNotebook(notebook)).toBe(false);
     });
 
+    it('rejects duplicate cell identifiers', () => {
+        const notebook = createNotebook();
+        notebook.cells[1]!.id = notebook.cells[0]!.id;
+
+        expect(isSerializedKustoNotebook(notebook)).toBe(false);
+    });
+
     it('rejects non-JSON metadata values', () => {
         const notebook = createNotebook() as unknown as {
             metadata: { custom: Record<string, unknown> };

@@ -2,6 +2,8 @@
 // Licensed under the MIT license.
 
 export const KUSTO_NOTEBOOK_FORMAT_VERSION = 1 as const;
+export const KUSTO_NOTEBOOK_TYPE = 'msKustoExplorer.kqlNotebook';
+export const KUSTO_NOTEBOOK_CELL_ID_METADATA_KEY = 'msKustoExplorer.cellId';
 
 export type NotebookJsonValue =
     | boolean
@@ -57,6 +59,11 @@ export function isSerializedKustoNotebook(value: unknown): value is SerializedKu
         return false;
     }
 
+    const ids = value.cells.map(cell => cell.id);
+    if (new Set(ids).size !== ids.length) {
+        return false;
+    }
+
     return value.metadata === undefined || isNotebookMetadata(value.metadata);
 }
 
@@ -82,14 +89,14 @@ function isNotebookMetadata(value: unknown): value is KustoNotebookMetadata {
         return false;
     }
 
-    if (value.connection !== undefined && !isNotebookConnection(value.connection)) {
+    if (value.connection !== undefined && !isKustoNotebookConnection(value.connection)) {
         return false;
     }
 
     return value.custom === undefined || isJsonObject(value.custom);
 }
 
-function isNotebookConnection(value: unknown): value is KustoNotebookConnection {
+export function isKustoNotebookConnection(value: unknown): value is KustoNotebookConnection {
     return isJsonObject(value)
         && typeof value.cluster === 'string'
         && (value.database === undefined || typeof value.database === 'string')

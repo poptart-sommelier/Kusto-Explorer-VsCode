@@ -50,7 +50,7 @@ export function formatCellValue(value: unknown | null): string {
  * other spreadsheet apps decode this back to the original value on
  * paste, preserving multi-line and tab-containing cells.
  */
-function escapeTsv(value: string): string {
+export function escapeTsv(value: string): string {
     if (/[\t\r\n"]/.test(value)) {
         return '"' + value.replace(/"/g, '""') + '"';
     }

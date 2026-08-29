@@ -26,6 +26,16 @@ Edit, run, and chart Kusto queries (KQL) right from VS Code. Explore databases a
 - Code actions and quick fixes for common issues and refactorings
 - Copy colorized query text to the clipboard for pasting into other documents
 
+### Kusto Notebooks
+
+- Create a `.kqlnb` notebook with **Kusto: New Kusto Notebook**
+- Mix executable KQL cells with Markdown notes
+- Select a cluster and database from the notebook toolbar
+- Run one cell or run cells sequentially with native progress, cancellation, and execution order
+- View bounded text results inline; outputs are not saved in the notebook file
+- During the initial notebook release, queries are limited to 1,000 rows until scalable result
+  sessions and the virtualized grid are available
+
 ### Connections (sidebar)
 
 - Maintain a list of Kusto clusters you connect to

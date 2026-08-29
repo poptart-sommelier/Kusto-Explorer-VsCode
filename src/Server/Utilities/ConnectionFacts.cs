@@ -1,4 +1,5 @@
 using Kusto.Language;
+using Kusto.Language.Symbols;
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
@@ -61,6 +62,13 @@ public static class ConnectionFacts
         return isLogAnalyticsWorkspace || isApplicationInsightsComponent
             ? Uri.UnescapeDataString(segments[^1])
             : databaseName;
+    }
+
+    public static ClusterSymbol? GetClusterSymbol(GlobalState globals, string clusterName)
+    {
+        return globals.Clusters.FirstOrDefault(cluster =>
+                cluster.Name.Equals(clusterName, StringComparison.OrdinalIgnoreCase))
+            ?? globals.GetCluster(clusterName);
     }
 
     private static bool IsAzureMonitorProxyHost(string host)
