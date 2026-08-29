@@ -14,11 +14,9 @@ import {
     type KustoNotebookConnection,
 } from './notebookFormat';
 import {
-    buildNotebookResultPreviews,
     KustoNotebookManager,
-    NOTEBOOK_PHASE_TWO_MAX_ROWS,
 } from './kustoNotebookManager';
-import type { IServer, QueryDiagnostic } from './server';
+import type { NotebookResultManager } from './notebookResultManager';
 
 const KUSTO_NOTEBOOK_CONTROLLER_ID = 'msKustoExplorer.kqlNotebookController';
 
@@ -36,9 +34,9 @@ export class KustoNotebookController implements vscode.Disposable {
     private executionOrder = 0;
 
     constructor(
-        private readonly server: IServer,
         private readonly connections: ConnectionManager,
         private readonly notebookManager: KustoNotebookManager,
+        private readonly resultManager: NotebookResultManager,
     ) {
         this.controller = vscode.notebooks.createNotebookController(
             KUSTO_NOTEBOOK_CONTROLLER_ID,
@@ -142,7 +140,6 @@ export class KustoNotebookController implements vscode.Disposable {
         const execution = this.controller.createNotebookCellExecution(cell);
         execution.executionOrder = ++this.executionOrder;
         execution.start(Date.now());
-        await execution.clearOutput();
 
         if (execution.token.isCancellationRequested) {
             execution.end(undefined, Date.now());
@@ -154,42 +151,42 @@ export class KustoNotebookController implements vscode.Disposable {
             await execution.replaceOutput(new vscode.NotebookCellOutput([
                 vscode.NotebookCellOutputItem.text('Cell is empty.'),
             ]));
+            await this.resultManager.releaseCellSession(cell);
             execution.end(true, Date.now());
             return { outcome: 'success', connection };
         }
 
+        let replacementSessionId: string | undefined;
         try {
             const clientRequestId = createClientRequestId();
-            const result = await this.server.runQuery(
+            const result = await this.resultManager.runQuery(
                 query,
                 connection.cluster,
                 connection.database,
-                true,
-                NOTEBOOK_PHASE_TWO_MAX_ROWS,
                 clientRequestId,
-                NOTEBOOK_PHASE_TWO_MAX_ROWS,
                 execution.token,
             );
+            replacementSessionId = result.sessionId;
 
             if (execution.token.isCancellationRequested) {
-                await execution.replaceOutput(new vscode.NotebookCellOutput([
-                    vscode.NotebookCellOutputItem.text('Query cancelled.'),
+                await this.resultManager.disposeSession(result.sessionId);
+                replacementSessionId = undefined;
+                await execution.appendOutput(new vscode.NotebookCellOutput([
+                    vscode.NotebookCellOutputItem.text('Query cancelled. Previous results were kept.'),
                 ]));
                 execution.end(undefined, Date.now());
                 return { outcome: 'cancelled', connection };
             }
 
-            if (!result) {
-                throw new Error('The Kusto language server did not return a result.');
-            }
-
-            if (result.connection || result.cluster) {
-                await this.connections.ensureServer(result.connection ?? result.cluster!);
+            const serverConnection = result.connection ?? result.provenance?.cluster;
+            if (serverConnection) {
+                await this.connections.ensureServer(serverConnection);
             }
             let effectiveConnection = connection;
-            if (result.cluster || result.database) {
-                const cluster = result.cluster ?? connection.cluster;
-                const database = result.database ?? (result.cluster ? undefined : connection.database);
+            if (result.provenance?.cluster || result.provenance?.database) {
+                const cluster = result.provenance.cluster ?? connection.cluster;
+                const database = result.provenance.database
+                    ?? (result.provenance.cluster ? undefined : connection.database);
                 const serverKind = this.connections.findServerInfo(cluster)?.serverKind;
                 effectiveConnection = {
                     cluster,
@@ -201,31 +198,35 @@ export class KustoNotebookController implements vscode.Disposable {
                 await this.notebookManager.setConnection(notebook, effectiveConnection);
             }
 
-            if (result.error) {
-                await execution.replaceOutput(createErrorOutput(result.error));
-                execution.end(false, Date.now());
-                return { outcome: 'failed', connection: effectiveConnection };
-            }
-
-            const outputs = result.data
-                ? createResultOutputs(result.data)
-                : [new vscode.NotebookCellOutput([
+            if (result.tables.length === 0) {
+                await execution.replaceOutput(new vscode.NotebookCellOutput([
                     vscode.NotebookCellOutputItem.text('Query completed without results.'),
-                ])];
-            await execution.replaceOutput(outputs);
+                ]));
+                await this.resultManager.disposeSession(result.sessionId);
+                replacementSessionId = undefined;
+                await this.resultManager.releaseCellSession(cell);
+            } else {
+                this.resultManager.prepareSession(notebook, cell, result.sessionId);
+                await execution.replaceOutput(this.resultManager.createOutput(result));
+                await this.resultManager.adoptSession(notebook, cell, result.sessionId);
+                replacementSessionId = undefined;
+            }
             execution.end(true, Date.now());
             return { outcome: 'success', connection: effectiveConnection };
         } catch (error) {
+            if (replacementSessionId) {
+                await this.resultManager.disposeSession(replacementSessionId);
+            }
             if (execution.token.isCancellationRequested) {
-                await execution.replaceOutput(new vscode.NotebookCellOutput([
-                    vscode.NotebookCellOutputItem.text('Query cancelled.'),
+                await execution.appendOutput(new vscode.NotebookCellOutput([
+                    vscode.NotebookCellOutputItem.text('Query cancelled. Previous results were kept.'),
                 ]));
                 execution.end(undefined, Date.now());
                 return { outcome: 'cancelled', connection };
             }
 
             const message = error instanceof Error ? error.message : String(error);
-            await execution.replaceOutput(new vscode.NotebookCellOutput([
+            await execution.appendOutput(new vscode.NotebookCellOutput([
                 vscode.NotebookCellOutputItem.error(new Error(message)),
             ]));
             execution.end(false, Date.now());
@@ -272,33 +273,4 @@ function toServerQuickPick(server: ServerInfo, group?: string): ServerQuickPickI
         ...(group ? { detail: `Group: ${group}` } : {}),
         server,
     };
-}
-
-function createErrorOutput(diagnostic: QueryDiagnostic): vscode.NotebookCellOutput {
-    const message = diagnostic.details
-        ? `${diagnostic.message}\n\n${diagnostic.details}`
-        : diagnostic.message;
-    return new vscode.NotebookCellOutput([
-        vscode.NotebookCellOutputItem.error(new Error(message)),
-    ]);
-}
-
-function createResultOutputs(data: NonNullable<Awaited<ReturnType<IServer['runQuery']>>>['data']): vscode.NotebookCellOutput[] {
-    if (!data) {
-        return [];
-    }
-
-    const notice = `Notebook queries are temporarily limited to ${NOTEBOOK_PHASE_TWO_MAX_ROWS.toLocaleString()} rows until scalable result sessions are enabled.`;
-    const outputs = [
-        new vscode.NotebookCellOutput([
-            vscode.NotebookCellOutputItem.text(notice),
-        ]),
-    ];
-    for (const preview of buildNotebookResultPreviews(data)) {
-        outputs.push(new vscode.NotebookCellOutput(
-            [vscode.NotebookCellOutputItem.text(preview.text)],
-            preview.tableName ? { tableName: preview.tableName } : undefined,
-        ));
-    }
-    return outputs;
 }

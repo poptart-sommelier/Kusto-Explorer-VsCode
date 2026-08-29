@@ -66,6 +66,8 @@ export interface ResultSessionStatus {
     sessionId: string;
     state: ResultSessionState;
     tables: ResultSessionTableStatus[];
+    /** Effective connection directive value, used by the extension host and never sent to the renderer. */
+    connection?: string;
     provenance?: ResultSessionProvenance;
     error?: QueryDiagnostic;
 }

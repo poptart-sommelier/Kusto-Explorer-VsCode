@@ -177,7 +177,7 @@ public class ResultTable
         return table;
     }
 
-    private static object? ConvertCellValue(object? value, string kustoType)
+    internal static object? ConvertCellValue(object? value, string kustoType)
     {
         if (value == null || value == DBNull.Value)
             return null;

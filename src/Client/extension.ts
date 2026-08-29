@@ -28,6 +28,7 @@ import type { IServer } from './features/server'
 import { KustoNotebookSerializer } from './features/kustoNotebookSerializer'
 import { KustoNotebookManager } from './features/kustoNotebookManager'
 import { KustoNotebookController } from './features/kustoNotebookController'
+import { NotebookResultManager } from './features/notebookResultManager'
 import { KUSTO_NOTEBOOK_TYPE } from './features/notebookFormat'
 import
     {
@@ -164,7 +165,8 @@ export async function activate(context: ExtensionContext)
 
     // activate native Kusto notebooks
     const notebookManager = new KustoNotebookManager(context, connectionManager);
-    const notebookController = new KustoNotebookController(server, connectionManager, notebookManager);
+    const notebookResultManager = new NotebookResultManager(context, server, clipboard);
+    const notebookController = new KustoNotebookController(connectionManager, notebookManager, notebookResultManager);
     context.subscriptions.push(
         vscode.workspace.registerNotebookSerializer(
             KUSTO_NOTEBOOK_TYPE,

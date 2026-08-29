@@ -40,6 +40,7 @@ public class Server : LspServer, ILogger, ISettingSource, IStorage, IAuthenticat
     private readonly IDocumentManager _documentManager;
     private readonly IDiagnosticsManager _diagnosticsManager;
     private readonly IQueryManager _queryManager;
+    private readonly IResultSessionManager _resultSessionManager;
     private readonly IEntityManager _entityManager;
     private readonly ImmutableList<string> _args;
 
@@ -55,6 +56,35 @@ public class Server : LspServer, ILogger, ISettingSource, IStorage, IAuthenticat
         IDiagnosticsManager diagnosticsManager,
         IQueryManager queryManager,
         IEntityManager entityManager)
+        : this(
+            input,
+            output,
+            args,
+            optionsManager,
+            connectionManager,
+            schemaManager,
+            symbolManager,
+            documentManager,
+            diagnosticsManager,
+            queryManager,
+            new ResultSessionManager(queryManager),
+            entityManager)
+    {
+    }
+
+    public Server(
+        Stream input,
+        Stream output,
+        string[] args,
+        IOptionsManager optionsManager,
+        IConnectionManager connectionManager,
+        ISchemaManager schemaManager,
+        ISymbolManager symbolManager,
+        IDocumentManager documentManager,
+        IDiagnosticsManager diagnosticsManager,
+        IQueryManager queryManager,
+        IResultSessionManager resultSessionManager,
+        IEntityManager entityManager)
         : base(input, output)
     {
         _args = args.ToImmutableList();
@@ -68,6 +98,7 @@ public class Server : LspServer, ILogger, ISettingSource, IStorage, IAuthenticat
         _documentManager = documentManager;
         _diagnosticsManager = diagnosticsManager;
         _queryManager = queryManager;
+        _resultSessionManager = resultSessionManager;
         _entityManager = entityManager;
         InitEvents();
     }
@@ -97,6 +128,7 @@ public class Server : LspServer, ILogger, ISettingSource, IStorage, IAuthenticat
         _documentManager = new DocumentManager(_symbolManager, _logger);
         _diagnosticsManager = new DiagnosticsManager(_documentManager, _logger);
         _queryManager = new QueryManager(_connectionManager, _symbolManager, _documentManager, _optionsManager, _logger);
+        _resultSessionManager = new ResultSessionManager(_queryManager);
         _entityManager = new EntityManager(_schemaManager, _optionsManager);
         InitEvents();
     }
@@ -105,6 +137,18 @@ public class Server : LspServer, ILogger, ISettingSource, IStorage, IAuthenticat
     {
         _symbolManager.GlobalsChanged += _symbolManager_GlobalsChanged;
         _diagnosticsManager.DiagnosticsUpdated += _diagnosticsManager_DiagnosticsUpdated;
+    }
+
+    public override Task OnShutdownAsync(CancellationToken cancellationToken)
+    {
+        _resultSessionManager.Dispose();
+        return base.OnShutdownAsync(cancellationToken);
+    }
+
+    public override Task OnExitAsync(CancellationToken cancellationToken)
+    {
+        _resultSessionManager.Dispose();
+        return base.OnExitAsync(cancellationToken);
     }
 
     void ILogger.Log(string message)
@@ -2022,6 +2066,58 @@ public class Server : LspServer, ILogger, ISettingSource, IStorage, IAuthenticat
     #endregion
 
     #region Run
+
+    [JsonRpcMethod(ResultSessionProtocol.StartMethod, UseSingleObjectParameterDeserialization = true)]
+    public Task<StartResultSessionResult> OnStartResultSessionAsync(
+        StartResultSessionParams @params)
+    {
+        return _resultSessionManager.StartAsync(@params);
+    }
+
+    [JsonRpcMethod(ResultSessionProtocol.CancelMethod, UseSingleObjectParameterDeserialization = true)]
+    public Task<CancelResultSessionOperationResult> OnCancelResultSessionOperationAsync(
+        CancelResultSessionOperationParams @params)
+    {
+        return _resultSessionManager.CancelAsync(@params);
+    }
+
+    [JsonRpcMethod(ResultSessionProtocol.StatusMethod, UseSingleObjectParameterDeserialization = true)]
+    public Task<ResultSessionStatus> OnGetResultSessionStatusAsync(
+        GetResultSessionStatusParams @params)
+    {
+        return _resultSessionManager.GetStatusAsync(@params);
+    }
+
+    [JsonRpcMethod(ResultSessionProtocol.SetViewMethod, UseSingleObjectParameterDeserialization = true)]
+    public Task<SetResultSessionViewResult> OnSetResultSessionViewAsync(
+        SetResultSessionViewParams @params,
+        CancellationToken cancellationToken)
+    {
+        return _resultSessionManager.SetViewAsync(@params, cancellationToken);
+    }
+
+    [JsonRpcMethod(ResultSessionProtocol.PageMethod, UseSingleObjectParameterDeserialization = true)]
+    public Task<ResultSessionPage> OnGetResultSessionPageAsync(
+        GetResultSessionPageParams @params,
+        CancellationToken cancellationToken)
+    {
+        return _resultSessionManager.GetPageAsync(@params, cancellationToken);
+    }
+
+    [JsonRpcMethod(ResultSessionProtocol.ProjectionMethod, UseSingleObjectParameterDeserialization = true)]
+    public Task<ResultSessionProjection> OnGetResultSessionProjectionAsync(
+        GetResultSessionProjectionParams @params,
+        CancellationToken cancellationToken)
+    {
+        return _resultSessionManager.GetProjectionAsync(@params, cancellationToken);
+    }
+
+    [JsonRpcMethod(ResultSessionProtocol.DisposeMethod, UseSingleObjectParameterDeserialization = true)]
+    public Task<DisposeResultSessionResult> OnDisposeResultSessionAsync(
+        DisposeResultSessionParams @params)
+    {
+        return _resultSessionManager.DisposeAsync(@params);
+    }
 
     private static ImmutableDictionary<string, string> BuildQueryOptions(bool? isReadOnly, long? maxRows)
     {

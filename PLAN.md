@@ -378,6 +378,10 @@ Exit criteria:
 
 ### Phase 3: Scalable local result sessions
 
+Status: implemented with server-owned, paged `DataTable` snapshots. The extension host and renderer
+never receive a whole result. Kusto.Data currently finishes parsing the server response before pages
+become available; true row-by-row arrival remains a later connection-layer improvement.
+
 Deliverables:
 
 - Replace whole-result notebook transport with local result sessions.

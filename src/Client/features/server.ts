@@ -7,6 +7,23 @@ import {
     acquireMicrosoftAuthenticationToken,
     GetAuthenticationTokenParams,
 } from './authentication';
+import {
+    RESULT_SESSION_METHODS,
+    type CancelResultSessionOperationParams,
+    type CancelResultSessionOperationResult,
+    type DisposeResultSessionParams,
+    type DisposeResultSessionResult,
+    type GetResultSessionPageParams,
+    type GetResultSessionProjectionParams,
+    type GetResultSessionStatusParams,
+    type ResultSessionPage,
+    type ResultSessionProjection,
+    type ResultSessionStatus,
+    type SetResultSessionViewParams,
+    type SetResultSessionViewResult,
+    type StartResultSessionParams,
+    type StartResultSessionResult,
+} from './resultSession';
 
 /**
  * Interface for the Kusto Language Server, used by all components.
@@ -37,6 +54,13 @@ export interface IServer {
     ensureDocument(uri: string, text: string): Promise<void>;
     validateQuery(query: string, cluster: string, database?: string): Promise<ValidateQueryResult | null>;
     getMinifiedQuery(query: string): Promise<GetMinifiedQueryResult | null>;
+    startResultSession(params: StartResultSessionParams): Promise<StartResultSessionResult>;
+    cancelResultSessionOperation(params: CancelResultSessionOperationParams): Promise<CancelResultSessionOperationResult>;
+    getResultSessionStatus(params: GetResultSessionStatusParams): Promise<ResultSessionStatus>;
+    setResultSessionView(params: SetResultSessionViewParams): Promise<SetResultSessionViewResult>;
+    getResultSessionPage(params: GetResultSessionPageParams): Promise<ResultSessionPage>;
+    getResultSessionProjection(params: GetResultSessionProjectionParams): Promise<ResultSessionProjection>;
+    disposeResultSession(params: DisposeResultSessionParams): Promise<DisposeResultSessionResult>;
 
     // Notifications (client → server)
     sendConnectionsUpdated(connections: string[]): void;
@@ -362,6 +386,34 @@ export class Server implements IServer {
         );
     }
 
+    startResultSession(params: StartResultSessionParams): Promise<StartResultSessionResult> {
+        return this.client.sendRequest<StartResultSessionResult>(RESULT_SESSION_METHODS.start, params);
+    }
+
+    cancelResultSessionOperation(params: CancelResultSessionOperationParams): Promise<CancelResultSessionOperationResult> {
+        return this.client.sendRequest<CancelResultSessionOperationResult>(RESULT_SESSION_METHODS.cancel, params);
+    }
+
+    getResultSessionStatus(params: GetResultSessionStatusParams): Promise<ResultSessionStatus> {
+        return this.client.sendRequest<ResultSessionStatus>(RESULT_SESSION_METHODS.status, params);
+    }
+
+    setResultSessionView(params: SetResultSessionViewParams): Promise<SetResultSessionViewResult> {
+        return this.client.sendRequest<SetResultSessionViewResult>(RESULT_SESSION_METHODS.setView, params);
+    }
+
+    getResultSessionPage(params: GetResultSessionPageParams): Promise<ResultSessionPage> {
+        return this.client.sendRequest<ResultSessionPage>(RESULT_SESSION_METHODS.page, params);
+    }
+
+    getResultSessionProjection(params: GetResultSessionProjectionParams): Promise<ResultSessionProjection> {
+        return this.client.sendRequest<ResultSessionProjection>(RESULT_SESSION_METHODS.projection, params);
+    }
+
+    disposeResultSession(params: DisposeResultSessionParams): Promise<DisposeResultSessionResult> {
+        return this.client.sendRequest<DisposeResultSessionResult>(RESULT_SESSION_METHODS.dispose, params);
+    }
+
     // ─── Notifications (client → server) ──────────────────────────────
 
     /**
@@ -435,6 +487,13 @@ export class NullServer implements IServer {
     ensureDocument(): Promise<void> { return Promise.resolve(); }
     validateQuery(): Promise<ValidateQueryResult | null> { return Promise.resolve(null); }
     getMinifiedQuery(): Promise<GetMinifiedQueryResult | null> { return Promise.resolve(null); }
+    startResultSession(): Promise<StartResultSessionResult> { return Promise.reject(new Error('Kusto language server is unavailable.')); }
+    cancelResultSessionOperation(): Promise<CancelResultSessionOperationResult> { return Promise.resolve({ accepted: false }); }
+    getResultSessionStatus(): Promise<ResultSessionStatus> { return Promise.reject(new Error('Kusto language server is unavailable.')); }
+    setResultSessionView(): Promise<SetResultSessionViewResult> { return Promise.resolve({ accepted: false, revision: 0 }); }
+    getResultSessionPage(): Promise<ResultSessionPage> { return Promise.reject(new Error('Kusto language server is unavailable.')); }
+    getResultSessionProjection(): Promise<ResultSessionProjection> { return Promise.reject(new Error('Kusto language server is unavailable.')); }
+    disposeResultSession(): Promise<DisposeResultSessionResult> { return Promise.resolve({ disposed: false }); }
     sendConnectionsUpdated(): void {}
     sendDocumentConnectionChanged(): void {}
     onDocumentReady(): Disposable { return NullServer.noopDisposable; }

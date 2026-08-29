@@ -3,58 +3,9 @@
 
 import * as vscode from 'vscode';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
-    buildNotebookResultPreviews,
-    KustoNotebookManager,
-    NOTEBOOK_PREVIEW_MAX_CHARACTERS,
-} from '../../features/kustoNotebookManager';
+import { KustoNotebookManager } from '../../features/kustoNotebookManager';
 import { KUSTO_NOTEBOOK_CELL_ID_METADATA_KEY } from '../../features/notebookFormat';
 import type { ConnectionManager } from '../../features/connectionManager';
-import type { ResultData } from '../../features/server';
-
-describe('buildNotebookResultPreviews', () => {
-    it('formats typed result tables as bounded TSV text', () => {
-        const data: ResultData = {
-            tables: [{
-                name: 'PrimaryResult',
-                columns: [
-                    { name: 'State', type: 'string' },
-                    { name: 'Count', type: 'long' },
-                ],
-                rows: [['WA', 42], ['OR', 7]],
-            }],
-        };
-
-        const previews = buildNotebookResultPreviews(data);
-
-        expect(previews).toEqual([{
-            tableName: 'PrimaryResult',
-            text: 'PrimaryResult (2 rows)\nState\tCount\nWA\t42\nOR\t7',
-        }]);
-    });
-
-    it('truncates output that exceeds the character budget', () => {
-        const data: ResultData = {
-            tables: [{
-                name: 'Large',
-                columns: [{ name: 'Value', type: 'string' }],
-                rows: [['a'.repeat(100)], ['b'.repeat(100)]],
-            }],
-        };
-
-        const previews = buildNotebookResultPreviews(data, 120);
-
-        expect(previews[0]?.text).toContain('Output truncated');
-        expect(previews[0]?.text.length).toBeLessThanOrEqual(120);
-        expect(previews[0]?.text.length).toBeLessThan(NOTEBOOK_PREVIEW_MAX_CHARACTERS);
-    });
-
-    it('describes a query with no tabular results', () => {
-        expect(buildNotebookResultPreviews({ tables: [] })).toEqual([
-            { text: 'Query completed without tabular results.' },
-        ]);
-    });
-});
 
 describe('KustoNotebookManager', () => {
     afterEach(() => {

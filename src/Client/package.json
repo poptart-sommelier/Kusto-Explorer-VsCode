@@ -123,6 +123,17 @@
         ]
       }
     ],
+    "notebookRenderer": [
+      {
+        "id": "msKustoExplorer.kqlNotebookResultRenderer",
+        "displayName": "Kusto Result Grid",
+        "entrypoint": "./renderers/kustoResultRenderer.js",
+        "mimeTypes": [
+          "application/vnd.ms-kusto.result-session+json"
+        ],
+        "requiresMessaging": "always"
+      }
+    ],
     "commands": [
       {
         "command": "msKustoExplorer.runQuery",

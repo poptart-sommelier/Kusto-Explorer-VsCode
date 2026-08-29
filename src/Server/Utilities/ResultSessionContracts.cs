@@ -128,6 +128,9 @@ public sealed class ResultSessionStatus
     [DataMember(Name = "tables")]
     public required ImmutableList<ResultSessionTableStatus> Tables { get; init; }
 
+    [DataMember(Name = "connection")]
+    public string? Connection { get; init; }
+
     [DataMember(Name = "provenance")]
     public ResultSessionProvenance? Provenance { get; init; }
 

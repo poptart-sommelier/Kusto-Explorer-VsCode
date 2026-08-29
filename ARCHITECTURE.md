@@ -260,11 +260,14 @@ The Phase 2 native notebook shell consists of:
 - `kustoNotebookSerializer.ts` — converts version 1 `.kqlnb` JSON to native notebook cells and
   deliberately omits outputs and execution summaries when saving.
 - `kustoNotebookManager.ts` — creates notebooks, stores the selected non-secret connection in
-  notebook metadata, synchronizes that connection to open cell documents, and builds bounded text
-  previews.
-- `kustoNotebookController.ts` — runs KQL cells sequentially through the existing `IServer.runQuery`
-  seam, supplies native progress/execution ordering, passes cancellation to JSON-RPC, and creates
-  inline output.
+  notebook metadata, and synchronizes that connection to open cell documents.
+- `kustoNotebookController.ts` — runs KQL cells sequentially through result sessions, supplies native
+  progress/execution ordering, and replaces a cell's previous successful result only after its new
+  query succeeds.
+- `notebookResultManager.ts` — owns the extension-host side of result-session polling, renderer
+  messaging, bounded projection/copy requests, and session cleanup when cells or notebooks close.
+- `renderers/kustoResultRenderer.js` — renders paged results as a native notebook output with table
+  tabs, virtual scrolling, sorting, column layout, selection, copying, and keyboard navigation.
 
 KQL notebook cells use the `vscode-notebook-cell` document scheme in the language-client selector,
 so they receive the same completion, diagnostics, formatting, hover, and navigation services as
@@ -272,15 +275,7 @@ so they receive the same completion, diagnostics, formatting, hover, and navigat
 to the language server but does not persist generated cell URIs in workspace storage. The notebook's
 own connection metadata remains the durable source.
 
-Until Phase 3 implements result sessions and a virtualized renderer, the shell requests no more than
-1,000 rows and renders no more than 2,000,000 text characters. Every successful cell displays the row
-limit notice, and oversized text previews display a truncation notice. These explicit safety limits
-avoid reproducing the unbounded current results path inside native notebook output. The row cap is
-enforced in `QueryManager` after client-request-property directives are applied, so a `#crp`
-directive cannot raise it.
-
-Large notebook results must not follow the existing whole-result path. The planned ownership model
-is:
+Large notebook results do not follow the existing whole-result path. The ownership model is:
 
 ```mermaid
 flowchart LR
@@ -311,12 +306,22 @@ flowchart LR
 - Status is intentionally pull-based in version 1. The controller polls while work is active, and
   cancellation stops superseded execution or filtering rather than adding a second notification
   channel.
+- The renderer requests 200 rows at a time and retains at most ten pages per table. The protocol caps
+  both normal and projection pages at 1,000 rows.
+- The first result-store implementation retains the `DataTable` objects produced by Kusto.Data in the
+  local .NET process. It removes the expensive whole-result JSON, TypeScript, and renderer copies, but
+  Kusto.Data still finishes parsing each response before the result becomes browsable. Incremental
+  row arrival requires a future streaming connection seam.
+- Result sessions expire after 30 idle minutes, are capped at 64 retained sessions, and are also
+  disposed deterministically when a result is replaced, a cell is deleted, a notebook closes, or the
+  extension/server shuts down.
 
 The version 1 cross-process shapes and stable method names are defined in
 `features/resultSession.ts` and `Utilities/ResultSessionContracts.cs`. They cover starting,
 cancelling, status/progress, applying a view, reading a page, reading a bounded projection, and
-disposing a session. These are contracts only in Phase 1; handlers and storage arrive with the
-scalable result-session implementation.
+disposing a session. `ResultSessionManager` owns the server snapshot, revisioned sort views, paging,
+bounded projections, cancellation, and cleanup. Phase 4 adds regex filter evaluation through the
+existing view contract.
 
 #### Current-path performance baseline
 

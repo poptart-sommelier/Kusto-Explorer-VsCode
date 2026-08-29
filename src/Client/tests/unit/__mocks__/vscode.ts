@@ -4,6 +4,9 @@
 // Minimal mock of the vscode module for unit testing.
 // Add additional mocks here as needed when testing features that use the vscode API.
 
+export const __notebookChangeListeners: Array<(event: unknown) => void> = [];
+export const __notebookCloseListeners: Array<(notebook: unknown) => void> = [];
+
 export const workspace = {
     onDidCloseTextDocument: () => ({ dispose: () => {} }),
     onDidChangeTextDocument: () => ({ dispose: () => {} }),
@@ -17,8 +20,24 @@ export const workspace = {
     registerFileSystemProvider: () => ({ dispose: () => {} }),
     registerNotebookSerializer: () => ({ dispose: () => {} }),
     onDidOpenNotebookDocument: () => ({ dispose: () => {} }),
-    onDidChangeNotebookDocument: () => ({ dispose: () => {} }),
-    onDidCloseNotebookDocument: () => ({ dispose: () => {} }),
+    onDidChangeNotebookDocument: (listener: (event: unknown) => void) => {
+        __notebookChangeListeners.push(listener);
+        return {
+            dispose: () => {
+                const index = __notebookChangeListeners.indexOf(listener);
+                if (index >= 0) __notebookChangeListeners.splice(index, 1);
+            },
+        };
+    },
+    onDidCloseNotebookDocument: (listener: (notebook: unknown) => void) => {
+        __notebookCloseListeners.push(listener);
+        return {
+            dispose: () => {
+                const index = __notebookCloseListeners.indexOf(listener);
+                if (index >= 0) __notebookCloseListeners.splice(index, 1);
+            },
+        };
+    },
     onWillSaveNotebookDocument: () => ({ dispose: () => {} }),
     applyEdit: async () => true,
     openNotebookDocument: async (_type: string, data: NotebookData) => ({
@@ -104,6 +123,10 @@ export class NotebookCellOutputItem {
     static error(value: Error) {
         return new NotebookCellOutputItem(value, 'application/vnd.code.notebook.error');
     }
+
+    static json(value: unknown, mime: string = 'application/json') {
+        return new NotebookCellOutputItem(value, mime);
+    }
 }
 
 export class NotebookCellOutput {
@@ -133,6 +156,11 @@ export class WorkspaceEdit {
 }
 
 export const __notebookControllers: Array<Record<string, unknown>> = [];
+export const __rendererMessagings: Array<{
+    emitter: EventEmitter<{ editor: unknown; message: unknown }>;
+    postMessage: (...args: unknown[]) => Promise<boolean>;
+    postedMessages: unknown[][];
+}> = [];
 
 export const notebooks = {
     createNotebookController: (id: string, notebookType: string, label: string) => {
@@ -150,6 +178,21 @@ export const notebooks = {
         };
         __notebookControllers.push(controller);
         return controller;
+    },
+    createRendererMessaging: () => {
+        const emitter = new EventEmitter<{ editor: unknown; message: unknown }>();
+        const postedMessages: unknown[][] = [];
+        const messaging = {
+            emitter,
+            onDidReceiveMessage: emitter.event,
+            postedMessages,
+            postMessage: async (...args: unknown[]) => {
+                postedMessages.push(args);
+                return true;
+            },
+        };
+        __rendererMessagings.push(messaging);
+        return messaging;
     },
 };
 

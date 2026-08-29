@@ -10,16 +10,6 @@ import {
     KUSTO_NOTEBOOK_TYPE,
     type KustoNotebookConnection,
 } from './notebookFormat';
-import type { ResultData } from './server';
-import { escapeTsv, formatCellValue } from './tsv';
-
-export const NOTEBOOK_PHASE_TWO_MAX_ROWS = 1_000;
-export const NOTEBOOK_PREVIEW_MAX_CHARACTERS = 2_000_000;
-
-export interface NotebookResultPreview {
-    tableName?: string;
-    text: string;
-}
 
 export class KustoNotebookManager implements vscode.Disposable {
     private readonly disposables: vscode.Disposable[];
@@ -251,63 +241,6 @@ export class KustoNotebookManager implements vscode.Disposable {
             await this.connections.clearTransientDocumentConnection(cellUri);
         }
     }
-}
-
-export function buildNotebookResultPreviews(
-    data: ResultData,
-    maxCharacters: number = NOTEBOOK_PREVIEW_MAX_CHARACTERS,
-): NotebookResultPreview[] {
-    if (data.tables.length === 0) {
-        return [{ text: 'Query completed without tabular results.' }];
-    }
-
-    let remainingCharacters = Math.max(0, maxCharacters);
-    const previews: NotebookResultPreview[] = [];
-    for (const table of data.tables) {
-        if (remainingCharacters <= 0) {
-            break;
-        }
-
-        const lines: string[] = [];
-        let wasTruncated = false;
-        const appendLine = (line: string): boolean => {
-            const lineSize = line.length + (lines.length > 0 ? 1 : 0);
-            if (lineSize > remainingCharacters) {
-                return false;
-            }
-            lines.push(line);
-            remainingCharacters -= lineSize;
-            return true;
-        };
-
-        if (!appendLine(`${table.name} (${table.rows.length.toLocaleString()} rows)`)
-            || !appendLine(table.columns.map(column => escapeTsv(column.name)).join('\t'))) {
-            wasTruncated = true;
-        }
-
-        if (!wasTruncated) {
-            for (const row of table.rows) {
-                const line = row.map(value => escapeTsv(formatCellValue(value))).join('\t');
-                if (!appendLine(line)) {
-                    wasTruncated = true;
-                    break;
-                }
-            }
-        }
-
-        if (wasTruncated) {
-            const notice = `Output truncated at ${maxCharacters.toLocaleString()} characters.`;
-            if (!appendLine(notice) && lines.length > 0) {
-                lines[lines.length - 1] = notice.slice(0, Math.max(0, lines[lines.length - 1]!.length));
-            }
-        }
-
-        previews.push({
-            tableName: table.name,
-            text: lines.join('\n'),
-        });
-    }
-    return previews;
 }
 
 function connectionsEqual(
