@@ -138,6 +138,36 @@ export class NotebookCellOutput {
 
 export class CancellationError extends Error {}
 
+export class CancellationTokenSource {
+    private readonly emitter = new EventEmitter<void>();
+    private cancelled = false;
+    readonly token: {
+        readonly isCancellationRequested: boolean;
+        onCancellationRequested: EventEmitter<void>['event'];
+    };
+
+    constructor() {
+        const source = this;
+        this.token = {
+            get isCancellationRequested() {
+                return source.cancelled;
+            },
+            onCancellationRequested: this.emitter.event,
+        };
+    }
+
+    cancel() {
+        if (!this.cancelled) {
+            this.cancelled = true;
+            this.emitter.fire();
+        }
+    }
+
+    dispose() {
+        this.emitter.dispose();
+    }
+}
+
 export class NotebookEdit {
     static updateCellMetadata(index: number, metadata: { [key: string]: unknown }) {
         return { index, metadata };

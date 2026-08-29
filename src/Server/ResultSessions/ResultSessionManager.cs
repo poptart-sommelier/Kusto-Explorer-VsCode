@@ -5,6 +5,7 @@ using System.Collections.Concurrent;
 using System.Collections.Immutable;
 using System.Data;
 using System.Globalization;
+using System.Text.RegularExpressions;
 using Kusto.Data.Common;
 using Kusto.Language.Editor;
 
@@ -16,6 +17,9 @@ namespace Kusto.Vscode;
 public sealed class ResultSessionManager : IResultSessionManager
 {
     private static readonly TimeSpan DefaultIdleTimeout = TimeSpan.FromMinutes(30);
+    private static readonly TimeSpan RegexMatchTimeout = TimeSpan.FromMilliseconds(100);
+    private static readonly TimeSpan ViewEvaluationTimeout = TimeSpan.FromSeconds(5);
+    private const int MaximumRegexPatternLength = 4_096;
     private const int DefaultMaximumSessions = 64;
 
     private readonly IQueryManager _queryManager;
@@ -135,7 +139,7 @@ public sealed class ResultSessionManager : IResultSessionManager
         }
     }
 
-    public Task<SetResultSessionViewResult> SetViewAsync(
+    public async Task<SetResultSessionViewResult> SetViewAsync(
         SetResultSessionViewParams parameters,
         CancellationToken cancellationToken)
     {
@@ -144,49 +148,174 @@ public sealed class ResultSessionManager : IResultSessionManager
         cancellationToken.ThrowIfCancellationRequested();
         var session = GetSession(parameters.SessionId);
 
+        SessionTable table;
+        ViewEvaluation? evaluation;
+        ImmutableList<CompiledFilter> compiledFilters;
         lock (session.SyncRoot)
         {
             session.Touch();
-            var table = GetCompletedTable(session, parameters.TableId);
+            table = GetCompletedTable(session, parameters.TableId);
 
             if (parameters.Revision != table.ViewRevision + 1)
             {
-                return Task.FromResult(new SetResultSessionViewResult
+                return new SetResultSessionViewResult
                 {
                     Accepted = false,
                     Revision = table.ViewRevision
-                });
+                };
             }
 
-            if (parameters.Filters.Count != 0)
-            {
-                throw new NotSupportedException(
-                    "Result-session filters are not supported until Phase 4.");
-            }
-
+            ValidateFilterColumns(table, parameters.Filters);
             ValidateSorts(table, parameters.Sorts);
-            cancellationToken.ThrowIfCancellationRequested();
 
-            var sourceIndexes = Enumerable.Range(0, table.Data.Rows.Count).ToArray();
-            if (parameters.Sorts.Count != 0)
+            compiledFilters = CompileFilters(parameters.Filters);
+            table.CancelViewEvaluation();
+            table.ViewRevision = parameters.Revision;
+            table.ViewMatchedRows = null;
+            table.FilterStatuses = compiledFilters
+                .Select(filter => filter.Status)
+                .ToImmutableList();
+
+            var invalidFilter = compiledFilters.FirstOrDefault(filter => filter.Regex == null);
+            if (invalidFilter != null)
             {
-                Array.Sort(
-                    sourceIndexes,
-                    new SourceIndexComparer(table.Data, parameters.Sorts));
+                table.ViewState = ResultSessionContractValues.ViewStateFailed;
+                table.ViewError = new ResultSessionDiagnostic
+                {
+                    Message = $"Filter for column {invalidFilter.Filter.ColumnIndex} has an invalid regular expression.",
+                    Details = invalidFilter.Status.Error?.Message
+                };
+                return new SetResultSessionViewResult
+                {
+                    Accepted = true,
+                    Revision = table.ViewRevision
+                };
             }
 
-            cancellationToken.ThrowIfCancellationRequested();
-            table.ViewSourceIndexes = sourceIndexes;
-            table.ViewRevision = parameters.Revision;
-            table.ViewState = ResultSessionContractValues.ViewStateReady;
-            table.Sorts = parameters.Sorts;
-
-            return Task.FromResult(new SetResultSessionViewResult
-            {
-                Accepted = true,
-                Revision = table.ViewRevision
-            });
+            evaluation = new ViewEvaluation();
+            table.ViewEvaluation = evaluation;
+            table.ViewState = ResultSessionContractValues.ViewStateEvaluating;
+            table.ViewError = null;
         }
+
+        ViewEvaluationResult? result = null;
+        ResultSessionDiagnostic? evaluationFailure = null;
+        CancellationTokenSource? evaluationTimeout = null;
+        var readyViewPublished = false;
+        try
+        {
+            evaluationTimeout = new CancellationTokenSource(ViewEvaluationTimeout);
+            using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken,
+                session.Cancellation.Token,
+                evaluation.Cancellation.Token,
+                evaluationTimeout.Token);
+            result = await Task.Run(
+                () => EvaluateView(
+                    table,
+                    compiledFilters,
+                    parameters.Sorts,
+                    linkedCancellation.Token),
+                linkedCancellation.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+            when (evaluationTimeout?.IsCancellationRequested == true
+                && !cancellationToken.IsCancellationRequested
+                && !session.Cancellation.IsCancellationRequested
+                && !evaluation.Cancellation.IsCancellationRequested)
+        {
+            evaluationFailure = new ResultSessionDiagnostic
+            {
+                Message = $"Filtering exceeded the {ViewEvaluationTimeout.TotalSeconds:0}-second safety limit."
+            };
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // A newer revision or disposal superseded this evaluation.
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            evaluationFailure = new ResultSessionDiagnostic
+            {
+                Message = "The result view could not be evaluated.",
+                Details = exception.Message
+            };
+        }
+        finally
+        {
+            lock (session.SyncRoot)
+            {
+                if (ReferenceEquals(table.ViewEvaluation, evaluation))
+                {
+                    table.ViewEvaluation = null;
+                    if (result?.TimedOutFilterIndex is int timedOutFilterIndex)
+                    {
+                        var timedOutFilter = parameters.Filters[timedOutFilterIndex];
+                        var diagnostic = new ResultSessionDiagnostic
+                        {
+                            Message = $"Regular expression matching timed out after {RegexMatchTimeout.TotalMilliseconds:0} ms."
+                        };
+                        table.FilterStatuses = table.FilterStatuses.SetItem(
+                            timedOutFilterIndex,
+                            new ResultSessionColumnFilterStatus
+                            {
+                                ColumnIndex = timedOutFilter.ColumnIndex,
+                                State = ResultSessionContractValues.FilterStateInvalid,
+                                Error = diagnostic
+                            });
+                        table.ViewState = ResultSessionContractValues.ViewStateFailed;
+                        table.ViewMatchedRows = null;
+                        table.ViewError = new ResultSessionDiagnostic
+                        {
+                            Message = $"Filter for column {timedOutFilter.ColumnIndex} timed out.",
+                            Details = diagnostic.Message
+                        };
+                    }
+                    else if (result != null
+                        && session.State == ResultSessionContractValues.StateCompleted
+                        && !cancellationToken.IsCancellationRequested
+                        && !session.Cancellation.IsCancellationRequested
+                        && !evaluation.Cancellation.IsCancellationRequested)
+                    {
+                        table.ViewSourceIndexes = result.SourceIndexes;
+                        table.ReadyViewRevision = parameters.Revision;
+                        table.ViewMatchedRows = result.SourceIndexes.LongLength;
+                        table.ViewState = ResultSessionContractValues.ViewStateReady;
+                        table.ViewError = null;
+                        table.Filters = parameters.Filters;
+                        table.Sorts = parameters.Sorts;
+                        readyViewPublished = true;
+                    }
+                    else if (evaluationFailure != null
+                        && session.State == ResultSessionContractValues.StateCompleted)
+                    {
+                        table.ViewState = ResultSessionContractValues.ViewStateFailed;
+                        table.ViewMatchedRows = null;
+                        table.ViewError = evaluationFailure;
+                    }
+                    else if (cancellationToken.IsCancellationRequested
+                        && session.State == ResultSessionContractValues.StateCompleted)
+                    {
+                        table.ViewState = ResultSessionContractValues.ViewStateFailed;
+                        table.ViewMatchedRows = null;
+                        table.ViewError = new ResultSessionDiagnostic
+                        {
+                            Message = "The result view evaluation was cancelled."
+                        };
+                    }
+                }
+            }
+            evaluationTimeout?.Dispose();
+            evaluation.Dispose();
+        }
+
+        if (!readyViewPublished)
+            cancellationToken.ThrowIfCancellationRequested();
+        return new SetResultSessionViewResult
+        {
+            Accepted = true,
+            Revision = parameters.Revision
+        };
     }
 
     public Task<ResultSessionPage> GetPageAsync(
@@ -221,7 +350,7 @@ public sealed class ResultSessionManager : IResultSessionManager
                 ProtocolVersion = ResultSessionProtocol.Version,
                 SessionId = session.SessionId,
                 TableId = table.Id,
-                ViewRevision = table.ViewRevision,
+                ViewRevision = table.ReadyViewRevision,
                 Offset = parameters.Offset,
                 Rows = rows,
                 ViewRows = table.ViewSourceIndexes.LongLength
@@ -269,7 +398,7 @@ public sealed class ResultSessionManager : IResultSessionManager
                 ProtocolVersion = ResultSessionProtocol.Version,
                 SessionId = session.SessionId,
                 TableId = table.Id,
-                ViewRevision = table.ViewRevision,
+                ViewRevision = table.ReadyViewRevision,
                 Columns = columns,
                 Rows = rows,
                 Offset = parameters.Offset,
@@ -464,7 +593,13 @@ public sealed class ResultSessionManager : IResultSessionManager
             {
                 Revision = table.ViewRevision,
                 State = table.ViewState,
-                MatchedRows = table.ViewSourceIndexes.LongLength
+                MatchedRows = table.ViewMatchedRows,
+                Filters = table.FilterStatuses,
+                Error = table.ViewError,
+                ReadyRevision = table.ReadyViewRevision,
+                ReadyMatchedRows = table.ViewSourceIndexes.LongLength,
+                ReadyFilters = table.Filters,
+                ReadySorts = table.Sorts
             }
         };
     }
@@ -512,6 +647,144 @@ public sealed class ResultSessionManager : IResultSessionManager
         }
     }
 
+    private static void ValidateFilterColumns(
+        SessionTable table,
+        ImmutableList<ResultSessionColumnFilter> filters)
+    {
+        foreach (var filter in filters)
+        {
+            if (filter.ColumnIndex < 0 || filter.ColumnIndex >= table.Data.Columns.Count)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(filters),
+                    "A filter column is out of range.");
+            }
+        }
+    }
+
+    private static ImmutableList<CompiledFilter> CompileFilters(
+        ImmutableList<ResultSessionColumnFilter> filters)
+    {
+        return filters.Select(filter =>
+        {
+            if (filter.Pattern == null || filter.Pattern.Length > MaximumRegexPatternLength)
+            {
+                return new CompiledFilter(
+                    filter,
+                    null,
+                    new ResultSessionColumnFilterStatus
+                    {
+                        ColumnIndex = filter.ColumnIndex,
+                        State = ResultSessionContractValues.FilterStateInvalid,
+                        Error = new ResultSessionDiagnostic
+                        {
+                            Message = $"Regular expressions must contain at most {MaximumRegexPatternLength} characters."
+                        }
+                    });
+            }
+            try
+            {
+                var options = RegexOptions.CultureInvariant;
+                if (!filter.CaseSensitive)
+                    options |= RegexOptions.IgnoreCase;
+                var regex = new Regex(filter.Pattern, options, RegexMatchTimeout);
+                return new CompiledFilter(
+                    filter,
+                    regex,
+                    new ResultSessionColumnFilterStatus
+                    {
+                        ColumnIndex = filter.ColumnIndex,
+                        State = ResultSessionContractValues.FilterStateValid
+                    });
+            }
+            catch (ArgumentException exception)
+            {
+                return new CompiledFilter(
+                    filter,
+                    null,
+                    new ResultSessionColumnFilterStatus
+                    {
+                        ColumnIndex = filter.ColumnIndex,
+                        State = ResultSessionContractValues.FilterStateInvalid,
+                        Error = new ResultSessionDiagnostic
+                        {
+                            Message = $"Invalid regular expression: {exception.Message}"
+                        }
+                    });
+            }
+        }).ToImmutableList();
+    }
+
+    private static ViewEvaluationResult EvaluateView(
+        SessionTable table,
+        ImmutableList<CompiledFilter> filters,
+        ImmutableList<ResultSessionColumnSort> sorts,
+        CancellationToken cancellationToken)
+    {
+        var sourceIndexes = new List<int>(table.Data.Rows.Count);
+        for (var sourceIndex = 0; sourceIndex < table.Data.Rows.Count; sourceIndex++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var row = table.Data.Rows[sourceIndex];
+            var matches = true;
+            for (var filterIndex = 0; filterIndex < filters.Count; filterIndex++)
+            {
+                var filter = filters[filterIndex];
+                try
+                {
+                    if (!filter.Regex!.IsMatch(GetSearchText(
+                        row[filter.Filter.ColumnIndex],
+                        table.Columns[filter.Filter.ColumnIndex].Type)))
+                    {
+                        matches = false;
+                        break;
+                    }
+                }
+                catch (RegexMatchTimeoutException)
+                {
+                    return new ViewEvaluationResult([], filterIndex);
+                }
+            }
+
+            if (matches)
+                sourceIndexes.Add(sourceIndex);
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        var result = sourceIndexes.ToArray();
+        if (sorts.Count != 0)
+        {
+            try
+            {
+                Array.Sort(
+                    result,
+                    new SourceIndexComparer(table.Data, sorts, cancellationToken));
+            }
+            catch (InvalidOperationException exception)
+                when (exception.InnerException is OperationCanceledException)
+            {
+                throw new OperationCanceledException(cancellationToken);
+            }
+        }
+        cancellationToken.ThrowIfCancellationRequested();
+        return new ViewEvaluationResult(result, null);
+    }
+
+    /// <summary>
+    /// Produces the invariant text searched by filters from the same JSON-safe value sent on the wire.
+    /// Null database values are represented by the empty string.
+    /// </summary>
+    private static string GetSearchText(object? value, string kustoType)
+    {
+        var converted = ConvertCellValue(value, kustoType);
+        return converted switch
+        {
+            null => string.Empty,
+            bool boolean => boolean ? "true" : "false",
+            _ => Convert.ToString(converted, CultureInfo.InvariantCulture) ?? string.Empty
+        };
+    }
+
     private static void ValidatePage(long offset, int count, int maximumCount)
     {
         if (offset < 0)
@@ -528,10 +801,10 @@ public sealed class ResultSessionManager : IResultSessionManager
 
     private static void ValidateViewRevision(SessionTable table, long revision)
     {
-        if (revision != table.ViewRevision)
+        if (revision != table.ReadyViewRevision)
         {
             throw new InvalidOperationException(
-                $"Stale result view revision {revision}; current revision is {table.ViewRevision}.");
+                $"Stale result view revision {revision}; current ready revision is {table.ReadyViewRevision}.");
         }
     }
 
@@ -658,9 +931,15 @@ public sealed class ResultSessionManager : IResultSessionManager
     private static object? ConvertCellValue(object? value, string kustoType)
     {
         var converted = ResultTable.ConvertCellValue(value, kustoType);
-        return kustoType is "long" or "decimal" && converted != null
-            ? Convert.ToString(converted, CultureInfo.InvariantCulture)
-            : converted;
+        if (converted == null)
+            return null;
+        return kustoType switch
+        {
+            "long" or "decimal" => Convert.ToString(converted, CultureInfo.InvariantCulture),
+            "real" when converted is double real => real.ToString("R", CultureInfo.InvariantCulture),
+            "real" when converted is float real => real.ToString("R", CultureInfo.InvariantCulture),
+            _ => converted
+        };
     }
 
     private void CleanupIdleSessions()
@@ -714,6 +993,8 @@ public sealed class ResultSessionManager : IResultSessionManager
 
             session.State = ResultSessionContractValues.StateDisposed;
             session.Touch();
+            foreach (var table in session.Tables)
+                table.CancelViewEvaluation();
             DisposeTables(session.OwnedTables);
             session.OwnedTables = ImmutableList<DataTable>.Empty;
             session.Tables = ImmutableList<SessionTable>.Empty;
@@ -806,6 +1087,7 @@ public sealed class ResultSessionManager : IResultSessionManager
                 })
                 .ToImmutableList();
             ViewSourceIndexes = Enumerable.Range(0, data.Rows.Count).ToArray();
+            ViewMatchedRows = data.Rows.Count;
         }
 
         public string Id { get; }
@@ -813,17 +1095,33 @@ public sealed class ResultSessionManager : IResultSessionManager
         public ImmutableList<ResultSessionColumn> Columns { get; }
         public int[] ViewSourceIndexes { get; set; }
         public long ViewRevision { get; set; }
+        public long ReadyViewRevision { get; set; }
         public string ViewState { get; set; } = ResultSessionContractValues.ViewStateNone;
+        public long? ViewMatchedRows { get; set; }
+        public ImmutableList<ResultSessionColumnFilterStatus> FilterStatuses { get; set; }
+            = ImmutableList<ResultSessionColumnFilterStatus>.Empty;
+        public ResultSessionDiagnostic? ViewError { get; set; }
+        public ViewEvaluation? ViewEvaluation { get; set; }
+        public ImmutableList<ResultSessionColumnFilter> Filters { get; set; }
+            = ImmutableList<ResultSessionColumnFilter>.Empty;
         public ImmutableList<ResultSessionColumnSort> Sorts { get; set; }
             = ImmutableList<ResultSessionColumnSort>.Empty;
+
+        public void CancelViewEvaluation()
+        {
+            ViewEvaluation?.Cancel();
+            ViewEvaluation = null;
+        }
     }
 
     private sealed class SourceIndexComparer(
         DataTable table,
-        ImmutableList<ResultSessionColumnSort> sorts) : IComparer<int>
+        ImmutableList<ResultSessionColumnSort> sorts,
+        CancellationToken cancellationToken = default) : IComparer<int>
     {
         public int Compare(int left, int right)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             foreach (var sort in sorts)
             {
                 var comparison = CompareValues(
@@ -862,4 +1160,22 @@ public sealed class ResultSessionManager : IResultSessionManager
     private readonly record struct ProjectionMap(
         long Count,
         Func<long, int> GetSourceIndex);
+
+    private sealed record CompiledFilter(
+        ResultSessionColumnFilter Filter,
+        Regex? Regex,
+        ResultSessionColumnFilterStatus Status);
+
+    private sealed record ViewEvaluationResult(
+        int[] SourceIndexes,
+        int? TimedOutFilterIndex);
+
+    private sealed class ViewEvaluation : IDisposable
+    {
+        public CancellationTokenSource Cancellation { get; } = new();
+
+        public void Cancel() => Cancellation.Cancel();
+
+        public void Dispose() => Cancellation.Dispose();
+    }
 }

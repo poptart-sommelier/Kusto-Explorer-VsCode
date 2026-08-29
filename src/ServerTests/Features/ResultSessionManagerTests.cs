@@ -3,6 +3,7 @@
 
 using System.Collections.Immutable;
 using System.Data;
+using System.Diagnostics;
 using Kusto.Language;
 using Kusto.Language.Editor;
 using Kusto.Vscode;
@@ -126,24 +127,6 @@ public class ResultSessionManagerTests
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             GetPageAsync(manager, sessionId, tableId, 0, 0, 1));
 
-        await Assert.ThrowsAsync<NotSupportedException>(() =>
-            manager.SetViewAsync(new SetResultSessionViewParams
-            {
-                SessionId = sessionId,
-                TableId = tableId,
-                Revision = 2,
-                Filters =
-                [
-                    new ResultSessionColumnFilter
-                    {
-                        ColumnIndex = 0,
-                        Pattern = "1",
-                        CaseSensitive = false
-                    }
-                ],
-                Sorts = []
-            }, CancellationToken.None));
-
         var unchanged = await GetPageAsync(manager, sessionId, tableId, 1, 0, 10);
         CollectionAssert.AreEqual(
             new long[] { 1, 3, 0, 2 },
@@ -185,6 +168,289 @@ public class ResultSessionManagerTests
         }, CancellationToken.None);
         Assert.IsFalse(staleSet.Accepted);
         Assert.AreEqual(2, staleSet.Revision);
+    }
+
+    [TestMethod]
+    public async Task SetView_FiltersColumnsWithAndCaseSensitivityThenSortsStably()
+    {
+        var table = new DataTable("Events");
+        table.Columns.Add("Message", typeof(string));
+        table.Columns.Add("Region", typeof(string));
+        table.Columns.Add("Key", typeof(int));
+        table.Rows.Add("ERROR", "west", 2);
+        table.Rows.Add("error", "east", 1);
+        table.Rows.Add("INFO", "west", 0);
+        table.Rows.Add("Error", "west", 1);
+        table.Rows.Add("error", "west", 1);
+        using var manager = CompletedManager(table);
+        var (sessionId, tableId) = await StartAndGetTableAsync(manager);
+
+        var set = await manager.SetViewAsync(new SetResultSessionViewParams
+        {
+            SessionId = sessionId,
+            TableId = tableId,
+            Revision = 1,
+            Filters =
+            [
+                Filter(0, "^error$", caseSensitive: false),
+                Filter(1, "^west$", caseSensitive: true)
+            ],
+            Sorts =
+            [
+                new ResultSessionColumnSort
+                {
+                    ColumnIndex = 2,
+                    Direction = ResultSessionContractValues.SortAscending
+                }
+            ]
+        }, CancellationToken.None);
+
+        Assert.IsTrue(set.Accepted);
+        var status = await manager.GetStatusAsync(
+            new GetResultSessionStatusParams { SessionId = sessionId });
+        Assert.AreEqual(ResultSessionContractValues.ViewStateReady, status.Tables[0].View?.State);
+        Assert.AreEqual(3, status.Tables[0].View?.MatchedRows);
+        Assert.IsTrue(status.Tables[0].View?.Filters?.All(
+            filter => filter.State == ResultSessionContractValues.FilterStateValid));
+
+        var page = await GetPageAsync(manager, sessionId, tableId, 1, 0, 10);
+        Assert.AreEqual(3, page.ViewRows);
+        CollectionAssert.AreEqual(
+            new long[] { 3, 4, 0 },
+            page.Rows.Select(row => row.SourceIndex).ToArray());
+
+        var projection = await manager.GetProjectionAsync(
+            new GetResultSessionProjectionParams
+            {
+                SessionId = sessionId,
+                TableId = tableId,
+                ViewRevision = 1,
+                Scope = ResultSessionContractValues.ProjectionFiltered,
+                ColumnIndexes = [0],
+                Offset = 1,
+                Count = 2
+            },
+            CancellationToken.None);
+        Assert.AreEqual(3, projection.ProjectedRows);
+        CollectionAssert.AreEqual(
+            new long[] { 4, 0 },
+            projection.Rows.Select(row => row.SourceIndex).ToArray());
+
+        await manager.SetViewAsync(new SetResultSessionViewParams
+        {
+            SessionId = sessionId,
+            TableId = tableId,
+            Revision = 2,
+            Filters = [Filter(0, "^ERROR$", caseSensitive: true)],
+            Sorts = []
+        }, CancellationToken.None);
+        var caseSensitivePage = await GetPageAsync(manager, sessionId, tableId, 2, 0, 10);
+        CollectionAssert.AreEqual(
+            new long[] { 0 },
+            caseSensitivePage.Rows.Select(row => row.SourceIndex).ToArray());
+    }
+
+    [TestMethod]
+    public async Task SetView_InvalidRegexReportsFailedRevisionAndPreservesReadyView()
+    {
+        var table = new DataTable("Values");
+        table.Columns.Add("Value", typeof(string));
+        table.Rows.Add("keep");
+        table.Rows.Add("discard");
+        using var manager = CompletedManager(table);
+        var (sessionId, tableId) = await StartAndGetTableAsync(manager);
+
+        await manager.SetViewAsync(new SetResultSessionViewParams
+        {
+            SessionId = sessionId,
+            TableId = tableId,
+            Revision = 1,
+            Filters = [Filter(0, "^keep$", caseSensitive: true)],
+            Sorts = []
+        }, CancellationToken.None);
+
+        var invalid = await manager.SetViewAsync(new SetResultSessionViewParams
+        {
+            SessionId = sessionId,
+            TableId = tableId,
+            Revision = 2,
+            Filters = [Filter(0, "[", caseSensitive: true)],
+            Sorts = []
+        }, CancellationToken.None);
+
+        Assert.IsTrue(invalid.Accepted);
+        Assert.AreEqual(2, invalid.Revision);
+        var status = await manager.GetStatusAsync(
+            new GetResultSessionStatusParams { SessionId = sessionId });
+        var view = status.Tables[0].View;
+        Assert.AreEqual(2, view?.Revision);
+        Assert.AreEqual(ResultSessionContractValues.ViewStateFailed, view?.State);
+        Assert.IsNull(view?.MatchedRows);
+        Assert.AreEqual(ResultSessionContractValues.FilterStateInvalid, view?.Filters?[0].State);
+        StringAssert.Contains(view?.Filters?[0].Error?.Message, "Invalid regular expression");
+        StringAssert.Contains(view?.Error?.Message, "column 0");
+        Assert.AreEqual(1, view?.ReadyRevision);
+        Assert.AreEqual(1, view?.ReadyMatchedRows);
+        Assert.AreEqual("^keep$", view?.ReadyFilters?[0].Pattern);
+
+        var preservedPage = await GetPageAsync(manager, sessionId, tableId, 1, 0, 10);
+        CollectionAssert.AreEqual(
+            new long[] { 0 },
+            preservedPage.Rows.Select(row => row.SourceIndex).ToArray());
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            GetPageAsync(manager, sessionId, tableId, 2, 0, 10));
+    }
+
+    [TestMethod]
+    public async Task SetView_RejectsExcessivelyLongRegex()
+    {
+        var table = new DataTable("Text");
+        table.Columns.Add("Value", typeof(string));
+        table.Rows.Add("value");
+        using var manager = CompletedManager(table);
+        var (sessionId, tableId) = await StartAndGetTableAsync(manager);
+
+        var set = await manager.SetViewAsync(new SetResultSessionViewParams
+        {
+            SessionId = sessionId,
+            TableId = tableId,
+            Revision = 1,
+            Filters = [Filter(0, new string('a', 4_097), caseSensitive: true)],
+            Sorts = []
+        }, CancellationToken.None);
+
+        Assert.IsTrue(set.Accepted);
+        var status = await manager.GetStatusAsync(
+            new GetResultSessionStatusParams { SessionId = sessionId });
+        Assert.AreEqual(ResultSessionContractValues.ViewStateFailed, status.Tables[0].View?.State);
+        StringAssert.Contains(status.Tables[0].View?.Filters?[0].Error?.Message, "at most 4096");
+    }
+
+    [TestMethod]
+    public async Task SetView_PathologicalRegexTimesOutWithDiagnostic()
+    {
+        var table = new DataTable("Text");
+        table.Columns.Add("Value", typeof(string));
+        table.Rows.Add(new string('a', 50_000) + "!");
+        using var manager = CompletedManager(table);
+        var (sessionId, tableId) = await StartAndGetTableAsync(manager);
+        var stopwatch = Stopwatch.StartNew();
+
+        var set = await manager.SetViewAsync(new SetResultSessionViewParams
+        {
+            SessionId = sessionId,
+            TableId = tableId,
+            Revision = 1,
+            Filters = [Filter(0, "^(a+)+$", caseSensitive: true)],
+            Sorts = []
+        }, CancellationToken.None);
+
+        stopwatch.Stop();
+        Assert.IsTrue(set.Accepted);
+        Assert.IsLessThan(TimeSpan.FromSeconds(5), stopwatch.Elapsed);
+        var status = await manager.GetStatusAsync(
+            new GetResultSessionStatusParams { SessionId = sessionId });
+        Assert.AreEqual(ResultSessionContractValues.ViewStateFailed, status.Tables[0].View?.State);
+        StringAssert.Contains(status.Tables[0].View?.Error?.Message, "timed out");
+        StringAssert.Contains(status.Tables[0].View?.Filters?[0].Error?.Message, "100 ms");
+    }
+
+    [TestMethod]
+    public async Task SetView_SupersedingRevisionCancelsStaleEvaluation()
+    {
+        var table = new DataTable("Text");
+        table.Columns.Add("Value", typeof(string));
+        for (var index = 0; index < 100_000; index++)
+            table.Rows.Add($"{index:D6}-{new string('x', 64)}");
+        using var manager = CompletedManager(table);
+        var (sessionId, tableId) = await StartAndGetTableAsync(manager);
+
+        var stale = manager.SetViewAsync(new SetResultSessionViewParams
+        {
+            SessionId = sessionId,
+            TableId = tableId,
+            Revision = 1,
+            Filters = [Filter(0, "not-present$", caseSensitive: true)],
+            Sorts = []
+        }, CancellationToken.None);
+        var current = manager.SetViewAsync(new SetResultSessionViewParams
+        {
+            SessionId = sessionId,
+            TableId = tableId,
+            Revision = 2,
+            Filters = [],
+            Sorts = []
+        }, CancellationToken.None);
+
+        var results = await Task.WhenAll(stale, current);
+        Assert.IsTrue(results.All(result => result.Accepted));
+        var status = await manager.GetStatusAsync(
+            new GetResultSessionStatusParams { SessionId = sessionId });
+        Assert.AreEqual(2, status.Tables[0].View?.Revision);
+        Assert.AreEqual(ResultSessionContractValues.ViewStateReady, status.Tables[0].View?.State);
+        Assert.AreEqual(100_000, status.Tables[0].View?.MatchedRows);
+        var page = await GetPageAsync(manager, sessionId, tableId, 2, 99_999, 1);
+        Assert.AreEqual(99_999, page.Rows[0].SourceIndex);
+    }
+
+    [TestMethod]
+    public async Task SetView_CallerCancellationPreservesTheReadyView()
+    {
+        var table = new DataTable("Text");
+        table.Columns.Add("Value", typeof(string));
+        for (var index = 0; index < 100_000; index++)
+            table.Rows.Add($"{index:D6}-{new string('x', 64)}");
+        using var manager = CompletedManager(table);
+        var (sessionId, tableId) = await StartAndGetTableAsync(manager);
+        using var cancellation = new CancellationTokenSource();
+
+        var set = manager.SetViewAsync(new SetResultSessionViewParams
+        {
+            SessionId = sessionId,
+            TableId = tableId,
+            Revision = 1,
+            Filters = [Filter(0, "not-present$", caseSensitive: true)],
+            Sorts = []
+        }, cancellation.Token);
+        cancellation.Cancel();
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() => set);
+        var status = await manager.GetStatusAsync(
+            new GetResultSessionStatusParams { SessionId = sessionId });
+        Assert.AreEqual(1, status.Tables[0].View?.Revision);
+        Assert.AreEqual(ResultSessionContractValues.ViewStateFailed, status.Tables[0].View?.State);
+        StringAssert.Contains(status.Tables[0].View?.Error?.Message, "cancelled");
+        var original = await GetPageAsync(manager, sessionId, tableId, 0, 99_999, 1);
+        Assert.AreEqual(99_999, original.Rows[0].SourceIndex);
+    }
+
+    [TestMethod]
+    public async Task HundredThousandRows_LocalFilteringRemainsBounded()
+    {
+        var table = new DataTable("Numbers");
+        table.Columns.Add("Value", typeof(int));
+        for (var index = 0; index < 100_000; index++)
+            table.Rows.Add(index);
+        using var manager = CompletedManager(table);
+        var (sessionId, tableId) = await StartAndGetTableAsync(manager);
+        var stopwatch = Stopwatch.StartNew();
+
+        await manager.SetViewAsync(new SetResultSessionViewParams
+        {
+            SessionId = sessionId,
+            TableId = tableId,
+            Revision = 1,
+            Filters = [Filter(0, "^9999[0-9]$", caseSensitive: true)],
+            Sorts = []
+        }, CancellationToken.None);
+
+        stopwatch.Stop();
+        Assert.IsLessThan(TimeSpan.FromSeconds(5), stopwatch.Elapsed);
+        var page = await GetPageAsync(manager, sessionId, tableId, 1, 0, 1_000);
+        Assert.AreEqual(10, page.ViewRows);
+        Assert.HasCount(10, page.Rows);
+        Assert.AreEqual(99_990, page.Rows[0].SourceIndex);
+        Assert.AreEqual(99_999, page.Rows[^1].SourceIndex);
     }
 
     [TestMethod]
@@ -340,7 +606,8 @@ public class ResultSessionManagerTests
         var table = new DataTable("Precise");
         table.Columns.Add("LongValue", typeof(long));
         table.Columns.Add("DecimalValue", typeof(decimal));
-        table.Rows.Add(long.MaxValue, 1234567890123456789.123456789m);
+        table.Columns.Add("RealValue", typeof(double));
+        table.Rows.Add(long.MaxValue, 1234567890123456789.123456789m, 1e20);
         using var manager = CompletedManager(table);
         var (sessionId, tableId) = await StartAndGetTableAsync(manager);
 
@@ -348,6 +615,19 @@ public class ResultSessionManagerTests
 
         Assert.AreEqual("9223372036854775807", page.Rows[0].Values[0]);
         Assert.AreEqual("1234567890123456789.123456789", page.Rows[0].Values[1]);
+        Assert.AreEqual("1E+20", page.Rows[0].Values[2]);
+
+        var filtered = await manager.SetViewAsync(new SetResultSessionViewParams
+        {
+            SessionId = sessionId,
+            TableId = tableId,
+            Revision = 1,
+            Filters = [Filter(2, "^1E\\+20$", caseSensitive: true)],
+            Sorts = []
+        }, CancellationToken.None);
+        Assert.IsTrue(filtered.Accepted);
+        var filteredPage = await GetPageAsync(manager, sessionId, tableId, 1, 0, 1);
+        Assert.HasCount(1, filteredPage.Rows);
     }
 
     [TestMethod]
@@ -401,6 +681,19 @@ public class ResultSessionManagerTests
             Cluster = "cluster",
             Database = "database",
             ClientRequestId = "request"
+        };
+    }
+
+    private static ResultSessionColumnFilter Filter(
+        int columnIndex,
+        string pattern,
+        bool caseSensitive)
+    {
+        return new ResultSessionColumnFilter
+        {
+            ColumnIndex = columnIndex,
+            Pattern = pattern,
+            CaseSensitive = caseSensitive
         };
     }
 

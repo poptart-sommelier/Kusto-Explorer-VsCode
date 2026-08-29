@@ -190,6 +190,18 @@ public sealed class ResultSessionViewStatus
 
     [DataMember(Name = "error")]
     public ResultSessionDiagnostic? Error { get; init; }
+
+    [DataMember(Name = "readyRevision")]
+    public long? ReadyRevision { get; init; }
+
+    [DataMember(Name = "readyMatchedRows")]
+    public long? ReadyMatchedRows { get; init; }
+
+    [DataMember(Name = "readyFilters")]
+    public ImmutableList<ResultSessionColumnFilter>? ReadyFilters { get; init; }
+
+    [DataMember(Name = "readySorts")]
+    public ImmutableList<ResultSessionColumnSort>? ReadySorts { get; init; }
 }
 
 [DataContract]

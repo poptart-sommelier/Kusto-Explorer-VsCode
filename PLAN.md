@@ -399,6 +399,11 @@ Exit criteria:
 
 ### Phase 4: Per-column regex filtering
 
+Status: implemented. Filters run against the retained local snapshot, combine with `AND`, default to
+case-insensitive matching, and can be made case-sensitive per column. Invalid or timed-out patterns
+leave the previous ready view available. Patterns are limited to 4,096 characters, each match has a
+100 ms timeout, and a complete evaluation is limited to five seconds.
+
 Deliverables:
 
 - Add a filter row with one regex input per column.

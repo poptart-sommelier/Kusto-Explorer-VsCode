@@ -320,8 +320,11 @@ The version 1 cross-process shapes and stable method names are defined in
 `features/resultSession.ts` and `Utilities/ResultSessionContracts.cs`. They cover starting,
 cancelling, status/progress, applying a view, reading a page, reading a bounded projection, and
 disposing a session. `ResultSessionManager` owns the server snapshot, revisioned sort views, paging,
-bounded projections, cancellation, and cleanup. Phase 4 adds regex filter evaluation through the
-existing view contract.
+bounded projections, cancellation, and cleanup. Regex filters use the same revisioned view contract:
+filters on different columns combine with `AND`, evaluate against invariant display text, and use a
+4,096-character pattern limit, a 100 ms per-match timeout, and a five-second total evaluation limit.
+Null values match as an empty string. Invalid, timed-out, cancelled, or superseded evaluations cannot
+replace the previous ready view.
 
 #### Current-path performance baseline
 

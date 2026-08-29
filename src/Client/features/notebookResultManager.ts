@@ -7,6 +7,7 @@ import {
     RESULT_SESSION_MAX_PAGE_SIZE,
     RESULT_SESSION_MAX_PROJECTION_PAGE_SIZE,
     RESULT_SESSION_PROTOCOL_VERSION,
+    type ResultSessionColumnFilter,
     type ResultSessionColumnSort,
     type ResultSessionStatus,
 } from './resultSession';
@@ -26,7 +27,7 @@ interface ActiveResultSession {
 }
 
 interface RendererRequest {
-    type: 'page' | 'setSort' | 'copy';
+    type: 'page' | 'setView' | 'cancelView' | 'copy';
     requestId: string;
     outputId: string;
     sessionId: string;
@@ -40,10 +41,15 @@ interface PageRequest extends RendererRequest {
     count: number;
 }
 
-interface SortRequest extends RendererRequest {
-    type: 'setSort';
+interface ViewRequest extends RendererRequest {
+    type: 'setView';
     revision: number;
+    filters: ResultSessionColumnFilter[];
     sorts: ResultSessionColumnSort[];
+}
+
+interface CancelViewRequest extends RendererRequest {
+    type: 'cancelView';
 }
 
 interface CopyRequest extends RendererRequest {
@@ -57,6 +63,9 @@ export class NotebookResultManager implements vscode.Disposable {
     private readonly disposables: vscode.Disposable[];
     private readonly sessionsByCell = new Map<string, ActiveResultSession>();
     private readonly pendingSessionsByCell = new Map<string, ActiveResultSession>();
+    private readonly viewCancellations = new Map<string, vscode.CancellationTokenSource>();
+    private readonly rendererIds = new WeakMap<vscode.NotebookEditor, number>();
+    private nextRendererId = 0;
 
     constructor(
         context: vscode.ExtensionContext,
@@ -210,6 +219,7 @@ export class NotebookResultManager implements vscode.Disposable {
     }
 
     async disposeSession(sessionId: string): Promise<void> {
+        this.cancelViewsForSession(sessionId);
         for (const [cellUri, session] of this.sessionsByCell) {
             if (session.sessionId === sessionId) {
                 this.sessionsByCell.delete(cellUri);
@@ -247,6 +257,11 @@ export class NotebookResultManager implements vscode.Disposable {
         ].map(value => value.sessionId))];
         this.sessionsByCell.clear();
         this.pendingSessionsByCell.clear();
+        for (const cancellation of this.viewCancellations.values()) {
+            cancellation.cancel();
+            cancellation.dispose();
+        }
+        this.viewCancellations.clear();
         for (const sessionId of sessionIds) {
             this.disposeInBackground(sessionId);
         }
@@ -278,6 +293,7 @@ export class NotebookResultManager implements vscode.Disposable {
     }
 
     private disposeInBackground(sessionId: string): void {
+        this.cancelViewsForSession(sessionId);
         void this.server.disposeResultSession({ sessionId }).catch(error => {
             this.reportCleanupError(error);
         });
@@ -288,6 +304,16 @@ export class NotebookResultManager implements vscode.Disposable {
         void vscode.window.showWarningMessage(`Failed to release a Kusto result session: ${message}`);
     }
 
+    private cancelViewsForSession(sessionId: string): void {
+        const prefix = `${sessionId}\0`;
+        for (const [key, cancellation] of this.viewCancellations) {
+            if (key.startsWith(prefix)) {
+                cancellation.cancel();
+                this.viewCancellations.delete(key);
+            }
+        }
+    }
+
     private async handleRendererMessage(
         event: { editor: vscode.NotebookEditor; message: unknown },
     ): Promise<void> {
@@ -296,6 +322,8 @@ export class NotebookResultManager implements vscode.Disposable {
             return;
         }
 
+        let viewAccepted = false;
+        let viewCancellation: vscode.CancellationTokenSource | undefined;
         try {
             this.assertActiveSession(event.editor.notebook, request.sessionId);
             if (request.type === 'page') {
@@ -307,44 +335,123 @@ export class NotebookResultManager implements vscode.Disposable {
                     count: request.count,
                 });
                 await this.reply(event.editor, request, { type: 'pageResult', page });
-            } else if (request.type === 'setSort') {
-                const result = await this.server.setResultSessionView({
-                    sessionId: request.sessionId,
-                    tableId: request.tableId,
-                    revision: request.revision,
-                    filters: [],
-                    sorts: request.sorts,
-                });
-                if (!result.accepted) {
-                    throw new Error('The result view change was rejected.');
+            } else if (request.type === 'cancelView') {
+                const cancellation = this.viewCancellations
+                    .get(viewCancellationKey(
+                        request.sessionId,
+                        request.tableId,
+                        request.outputId,
+                        this.getRendererId(event.editor),
+                    ));
+                const accepted = cancellation !== undefined;
+                cancellation?.cancel();
+                await this.reply(event.editor, request, { type: 'cancelViewResult', accepted });
+            } else if (request.type === 'setView') {
+                const viewKey = viewCancellationKey(
+                    request.sessionId,
+                    request.tableId,
+                    request.outputId,
+                    this.getRendererId(event.editor),
+                );
+                viewCancellation = new vscode.CancellationTokenSource();
+                this.viewCancellations.set(viewKey, viewCancellation);
+                try {
+                    const result = await this.server.setResultSessionView({
+                        sessionId: request.sessionId,
+                        tableId: request.tableId,
+                        revision: request.revision,
+                        filters: request.filters,
+                        sorts: request.sorts,
+                    }, viewCancellation.token);
+                    if (!result.accepted) {
+                        const status = await this.server.getResultSessionStatus({
+                            sessionId: request.sessionId,
+                        });
+                        await this.reply(event.editor, request, {
+                            type: 'viewRejected',
+                            revision: result.revision,
+                            status,
+                        });
+                        return;
+                    }
+                    viewAccepted = true;
+                    const status = await this.waitForView(
+                        request.sessionId,
+                        request.tableId,
+                        request.revision,
+                        viewCancellation.token,
+                    );
+                    await this.reply(event.editor, request, { type: 'viewResult', status });
+                } finally {
+                    if (this.viewCancellations.get(viewKey) === viewCancellation) {
+                        this.viewCancellations.delete(viewKey);
+                    }
+                    viewCancellation.dispose();
                 }
-                const status = await this.waitForView(request.sessionId, request.tableId, request.revision);
-                await this.reply(event.editor, request, { type: 'sortResult', status });
             } else {
                 const copiedRows = await this.copyProjection(request);
                 await this.reply(event.editor, request, { type: 'copyResult', copiedRows });
             }
         } catch (error) {
-            let message = error instanceof Error ? error.message : String(error);
-            if (request.type === 'setSort') {
+            if (request.type === 'setView'
+                && (error instanceof vscode.CancellationError
+                    || viewCancellation?.token.isCancellationRequested)) {
+                let status: ResultSessionStatus | undefined;
                 try {
-                    const status = await this.server.getResultSessionStatus({
+                    status = await this.server.getResultSessionStatus({
+                        sessionId: request.sessionId,
+                    });
+                } catch (statusError) {
+                    const statusMessage = statusError instanceof Error
+                        ? statusError.message
+                        : String(statusError);
+                    void vscode.window.showWarningMessage(
+                        `Could not read the cancelled Kusto result view: ${statusMessage}`,
+                    );
+                }
+                await this.reply(event.editor, request, {
+                    type: 'viewCancelled',
+                    ...(status ? { status } : {}),
+                });
+                return;
+            }
+            let message = error instanceof Error ? error.message : String(error);
+            let status: ResultSessionStatus | undefined;
+            if (request.type === 'setView' && viewAccepted) {
+                try {
+                    status = await this.server.getResultSessionStatus({
                         sessionId: request.sessionId,
                     });
                     const table = status.tables.find(candidate => candidate.id === request.tableId);
                     if (table?.view?.revision === request.revision
-                        && table.view.state === 'ready') {
-                        await this.reply(event.editor, request, { type: 'sortResult', status });
+                        && (table.view.state === 'ready' || table.view.state === 'failed')) {
+                        await this.reply(event.editor, request, { type: 'viewResult', status });
                         return;
                     }
                 } catch (recoveryError) {
                     const recoveryMessage = recoveryError instanceof Error
                         ? recoveryError.message
                         : String(recoveryError);
-                    message = `${message} The current sort state could not be recovered: ${recoveryMessage}`;
+                    message = `${message} The current result view could not be recovered: ${recoveryMessage}`;
                 }
             }
-            await this.reply(event.editor, request, { type: 'requestError', message });
+            if (request.type === 'page' || request.type === 'copy') {
+                try {
+                    status = await this.server.getResultSessionStatus({
+                        sessionId: request.sessionId,
+                    });
+                } catch (statusError) {
+                    const statusMessage = statusError instanceof Error
+                        ? statusError.message
+                        : String(statusError);
+                    message = `${message} The current result view could not be read: ${statusMessage}`;
+                }
+            }
+            await this.reply(event.editor, request, {
+                type: 'requestError',
+                message,
+                ...(status ? { status } : {}),
+            });
         }
     }
 
@@ -360,12 +467,25 @@ export class NotebookResultManager implements vscode.Disposable {
         }
     }
 
+    private getRendererId(editor: vscode.NotebookEditor): number {
+        let id = this.rendererIds.get(editor);
+        if (id === undefined) {
+            id = ++this.nextRendererId;
+            this.rendererIds.set(editor, id);
+        }
+        return id;
+    }
+
     private async waitForView(
         sessionId: string,
         tableId: string,
         revision: number,
+        token: vscode.CancellationToken,
     ): Promise<ResultSessionStatus> {
         while (true) {
+            if (token.isCancellationRequested) {
+                throw new vscode.CancellationError();
+            }
             const status = await this.server.getResultSessionStatus({ sessionId });
             const table = status.tables.find(candidate => candidate.id === tableId);
             if (!table) {
@@ -375,7 +495,10 @@ export class NotebookResultManager implements vscode.Disposable {
                 return status;
             }
             if (table.view?.revision === revision && table.view.state === 'failed') {
-                throw new Error(table.view.error?.message ?? 'Sorting the result failed.');
+                return status;
+            }
+            if (table.view && table.view.revision > revision) {
+                throw new Error('The result view was replaced by a newer filter or sort.');
             }
             if (status.state !== 'completed') {
                 throw new Error(status.error?.message ?? 'The result session is no longer available.');
@@ -454,7 +577,9 @@ export class NotebookResultManager implements vscode.Disposable {
     }
 }
 
-function parseRendererRequest(value: unknown): PageRequest | SortRequest | CopyRequest | undefined {
+function parseRendererRequest(
+    value: unknown,
+): PageRequest | ViewRequest | CancelViewRequest | CopyRequest | undefined {
     if (!isRecord(value)
         || typeof value.requestId !== 'string'
         || typeof value.outputId !== 'string'
@@ -477,11 +602,22 @@ function parseRendererRequest(value: unknown): PageRequest | SortRequest | CopyR
         && value.count <= RESULT_SESSION_MAX_PAGE_SIZE) {
         return { ...common, type: 'page', offset: value.offset, count: value.count };
     }
-    if (value.type === 'setSort'
+    if (value.type === 'setView'
         && isNonNegativeInteger(value.revision)
+        && Array.isArray(value.filters)
+        && value.filters.every(isColumnFilter)
         && Array.isArray(value.sorts)
         && value.sorts.every(isColumnSort)) {
-        return { ...common, type: 'setSort', revision: value.revision, sorts: value.sorts };
+        return {
+            ...common,
+            type: 'setView',
+            revision: value.revision,
+            filters: value.filters,
+            sorts: value.sorts,
+        };
+    }
+    if (value.type === 'cancelView') {
+        return { ...common, type: 'cancelView' };
     }
     if (value.type === 'copy'
         && Array.isArray(value.rowRanges)
@@ -495,7 +631,24 @@ function parseRendererRequest(value: unknown): PageRequest | SortRequest | CopyR
             columnIndexes: value.columnIndexes,
         };
     }
+
     return undefined;
+}
+
+function viewCancellationKey(
+    sessionId: string,
+    tableId: string,
+    outputId: string,
+    rendererId: number,
+): string {
+    return `${sessionId}\0${tableId}\0${outputId}\0${rendererId}`;
+}
+
+function isColumnFilter(value: unknown): value is ResultSessionColumnFilter {
+    return isRecord(value)
+        && isNonNegativeInteger(value.columnIndex)
+        && typeof value.pattern === 'string'
+        && typeof value.caseSensitive === 'boolean';
 }
 
 function isColumnSort(value: unknown): value is ResultSessionColumnSort {

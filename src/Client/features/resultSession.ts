@@ -93,6 +93,10 @@ export interface ResultSessionViewStatus {
     matchedRows?: number;
     filters?: ResultSessionColumnFilterStatus[];
     error?: QueryDiagnostic;
+    readyRevision?: number;
+    readyMatchedRows?: number;
+    readyFilters?: ResultSessionColumnFilter[];
+    readySorts?: ResultSessionColumnSort[];
 }
 
 export interface ResultSessionColumnFilterStatus {

@@ -6,6 +6,8 @@ const ROW_HEIGHT = 28;
 const ROW_NUMBER_WIDTH = 58;
 const OVERSCAN_ROWS = 8;
 const MAX_CACHED_PAGES = 10;
+const FILTER_DEBOUNCE_MS = 300;
+const MAX_AUTOMATIC_VIEW_RETRIES = 1;
 const instances = new Map();
 
 export function activate(context) {
@@ -60,10 +62,27 @@ class ResultGrid {
         this.copyButton.disabled = true;
         this.copyButton.addEventListener('click', () => this.copySelection());
 
+        this.clearFiltersButton = document.createElement('button');
+        this.clearFiltersButton.type = 'button';
+        this.clearFiltersButton.textContent = 'Clear filters';
+        this.clearFiltersButton.disabled = true;
+        this.clearFiltersButton.addEventListener('click', () => this.clearFilters());
+
+        this.cancelViewButton = document.createElement('button');
+        this.cancelViewButton.type = 'button';
+        this.cancelViewButton.textContent = 'Cancel update';
+        this.cancelViewButton.disabled = true;
+        this.cancelViewButton.addEventListener('click', () => this.cancelViewChange());
+
         this.status = document.createElement('span');
         this.status.className = 'kusto-result-status';
         this.status.setAttribute('aria-live', 'polite');
-        this.toolbar.append(this.copyButton, this.status);
+        this.toolbar.append(
+            this.copyButton,
+            this.clearFiltersButton,
+            this.cancelViewButton,
+            this.status,
+        );
 
         this.headerViewport = document.createElement('div');
         this.headerViewport.className = 'kusto-grid-header-viewport';
@@ -111,12 +130,18 @@ class ResultGrid {
         this.scroller.setAttribute('aria-rowcount', String(this.state.totalRows + 1));
         this.scroller.setAttribute('aria-colcount', String(table.columns.length));
         this.copyButton.disabled = !this.state.selection;
+        this.updateFilterButton();
+        this.cancelViewButton.disabled = !this.state.pendingView;
         this.scroller.scrollTop = 0;
         this.scroller.scrollLeft = 0;
         this.renderHeader();
         this.updateCanvasSize();
         this.updateStatus();
         this.renderRows();
+        if (this.state.queuedView && !this.state.pendingView) {
+            this.state.queuedView = false;
+            this.sendViewChange(this.state);
+        }
     }
 
     getTableState(table) {
@@ -125,6 +150,7 @@ class ResultGrid {
             state = {
                 table,
                 revision: table.view?.revision ?? 0,
+                nextRevision: table.view?.revision ?? 0,
                 totalRows: table.view?.matchedRows ?? table.totalRows ?? table.rowsRead ?? 0,
                 order: table.columns.map((_, index) => index),
                 widths: table.columns.map(column => defaultColumnWidth(column)),
@@ -132,7 +158,14 @@ class ResultGrid {
                 pendingPages: new Set(),
                 selection: undefined,
                 sort: undefined,
+                draftSort: undefined,
+                filters: new Map(),
+                draftFilters: new Map(),
+                filterErrors: new Map(),
                 pendingView: undefined,
+                queuedView: false,
+                automaticViewRetries: 0,
+                filterTimer: undefined,
             };
             this.tableStates.set(table.id, state);
         }
@@ -157,11 +190,13 @@ class ResultGrid {
             header.className = 'kusto-grid-header-cell';
             header.style.width = `${this.state.widths[columnIndex]}px`;
             header.setAttribute('role', 'columnheader');
-            const displayedSort = this.state.pendingView?.sort ?? this.state.sort;
+            const displayedSort = this.state.draftSort;
             header.setAttribute('aria-sort', sortAria(displayedSort, columnIndex));
             header.draggable = true;
             header.dataset.displayIndex = String(displayIndex);
 
+            const label = document.createElement('div');
+            label.className = 'kusto-grid-header-label';
             const title = document.createElement('span');
             title.className = 'kusto-grid-header-title';
             title.textContent = column.name;
@@ -172,6 +207,47 @@ class ResultGrid {
             const sort = document.createElement('span');
             sort.className = 'kusto-grid-sort';
             sort.textContent = sortGlyph(displayedSort, columnIndex);
+            label.append(title, type, sort);
+
+            const filter = document.createElement('div');
+            filter.className = 'kusto-grid-filter';
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.value = this.state.draftFilters.get(columnIndex)?.pattern ?? '';
+            input.dataset.columnIndex = String(columnIndex);
+            input.placeholder = 'Regex filter';
+            input.maxLength = 4096;
+            input.setAttribute('aria-label', `Filter ${column.name} with a regular expression`);
+            input.title = 'Regular expression. Null values are matched as an empty string.';
+            input.spellcheck = false;
+            const filterError = this.state.filterErrors.get(columnIndex);
+            if (filterError) {
+                input.classList.add('invalid');
+                input.setAttribute('aria-invalid', 'true');
+                input.title = filterError;
+            }
+            input.addEventListener('input', () => {
+                this.updateFilter(columnIndex, input.value, input);
+            });
+            for (const eventName of ['click', 'pointerdown', 'dragstart']) {
+                input.addEventListener(eventName, event => event.stopPropagation());
+            }
+
+            const caseButton = document.createElement('button');
+            caseButton.type = 'button';
+            caseButton.className = 'kusto-grid-filter-case';
+            const caseSensitive = this.state.draftFilters.get(columnIndex)?.caseSensitive ?? false;
+            caseButton.classList.toggle('active', caseSensitive);
+            caseButton.textContent = 'Aa';
+            caseButton.title = caseSensitive ? 'Case-sensitive matching' : 'Case-insensitive matching';
+            caseButton.setAttribute('aria-pressed', String(caseSensitive));
+            caseButton.addEventListener('click', event => {
+                event.stopPropagation();
+                this.toggleFilterCase(columnIndex);
+            });
+            caseButton.addEventListener('pointerdown', event => event.stopPropagation());
+            filter.append(input, caseButton);
+
             const resize = document.createElement('span');
             resize.className = 'kusto-grid-resize';
             resize.addEventListener('pointerdown', event => {
@@ -179,8 +255,8 @@ class ResultGrid {
                 event.stopPropagation();
                 this.beginResize(event, columnIndex);
             });
-            header.append(title, type, sort, resize);
-            header.addEventListener('click', () => this.toggleSort(columnIndex));
+            header.append(label, filter, resize);
+            label.addEventListener('click', () => this.toggleSort(columnIndex));
             header.addEventListener('dragstart', event => {
                 event.dataTransfer?.setData('text/plain', String(displayIndex));
             });
@@ -194,6 +270,7 @@ class ResultGrid {
             });
             this.headerRow.append(header);
         });
+        this.headerRow.style.transform = `translateX(${-this.scroller.scrollLeft}px)`;
         this.headerViewport.replaceChildren(this.headerRow);
     }
 
@@ -293,60 +370,311 @@ class ResultGrid {
                 this.updateStatus();
                 this.renderRows();
             }
-        } else if (message.type === 'sortResult') {
+        } else if (message.type === 'viewResult') {
             if (targetState.pendingView?.requestId !== message.requestId) {
                 return;
             }
             const table = message.status.tables.find(candidate => candidate.id === targetState.table.id);
-            targetState.sort = targetState.pendingView.sort;
-            targetState.revision = targetState.pendingView.revision;
+            const pendingView = targetState.pendingView;
             targetState.pendingView = undefined;
-            targetState.totalRows = table?.view?.matchedRows ?? table?.totalRows ?? table?.rowsRead ?? 0;
-            targetState.pages.clear();
-            targetState.pendingPages.clear();
+            targetState.nextRevision = pendingView.revision;
+            if (table?.view?.state === 'ready') {
+                targetState.sort = pendingView.sort;
+                targetState.filters = cloneFilters(pendingView.filters);
+                if (!targetState.queuedView) {
+                    targetState.draftSort = pendingView.sort;
+                    targetState.draftFilters = cloneFilters(pendingView.filters);
+                }
+                targetState.revision = pendingView.revision;
+                targetState.filterErrors.clear();
+                targetState.totalRows = table.view.matchedRows ?? table.totalRows ?? table.rowsRead ?? 0;
+                targetState.pages.clear();
+                targetState.pendingPages.clear();
+                targetState.selection = undefined;
+            } else {
+                targetState.filterErrors = new Map(
+                    (table?.view?.filters ?? [])
+                        .filter(filter => filter.state === 'invalid')
+                        .filter(filter => {
+                            if (!targetState.queuedView) {
+                                return true;
+                            }
+                            const attempted = pendingView.filters.get(filter.columnIndex);
+                            const draft = targetState.draftFilters.get(filter.columnIndex);
+                            return attempted?.pattern === draft?.pattern
+                                && attempted?.caseSensitive === draft?.caseSensitive;
+                        })
+                        .map(filter => [
+                            filter.columnIndex,
+                            filter.error?.details ?? filter.error?.message ?? 'Invalid regular expression.',
+                        ]),
+                );
+            }
             if (targetState === this.state) {
                 this.updateCanvasSize();
+                this.updateStatus(table?.view?.state === 'failed'
+                    ? table.view.error?.message ?? 'Fix the invalid filter.'
+                    : undefined);
+                if (table?.view?.state === 'failed') {
+                    this.status.classList.add('error');
+                }
+                this.updateFilterButton();
+                this.cancelViewButton.disabled = true;
+                this.copyButton.disabled = !targetState.selection;
+                this.updateFilterValidation();
+                this.renderRows();
+            }
+            this.sendQueuedView(targetState);
+        } else if (message.type === 'copyResult' && targetState === this.state) {
+            this.status.textContent = `Copied ${message.copiedRows.toLocaleString()} row${message.copiedRows === 1 ? '' : 's'}.`;
+        } else if (message.type === 'viewCancelled') {
+            if (targetState.pendingView?.requestId !== message.requestId) {
+                return;
+            }
+            const table = message.status?.tables.find(candidate => candidate.id === targetState.table.id);
+            const cancelledRevision = targetState.pendingView.revision;
+            targetState.pendingView = undefined;
+            const synchronized = this.synchronizeReadyView(
+                targetState,
+                table,
+                targetState.queuedView,
+            );
+            if (!synchronized) {
+                targetState.nextRevision = table?.view?.revision ?? cancelledRevision;
+            }
+            if (targetState === this.state) {
+                this.cancelViewButton.disabled = true;
+                if (synchronized) {
+                    this.updateCanvasSize();
+                    this.updateFilterButton();
+                    this.renderHeader();
+                    this.copyButton.disabled = !targetState.selection;
+                }
                 this.updateStatus();
                 this.renderRows();
             }
-        } else if (message.type === 'copyResult' && targetState === this.state) {
-            this.status.textContent = `Copied ${message.copiedRows.toLocaleString()} row${message.copiedRows === 1 ? '' : 's'}.`;
+            this.sendQueuedView(targetState);
+        } else if (message.type === 'viewRejected') {
+            if (targetState.pendingView?.requestId !== message.requestId) {
+                return;
+            }
+            const table = message.status?.tables.find(candidate => candidate.id === targetState.table.id);
+            targetState.pendingView = undefined;
+            if (!this.synchronizeReadyView(targetState, table, true)) {
+                targetState.nextRevision = table?.view?.revision ?? message.revision;
+            }
+            const canRetry = targetState.automaticViewRetries < MAX_AUTOMATIC_VIEW_RETRIES;
+            if (canRetry) {
+                targetState.automaticViewRetries += 1;
+                targetState.queuedView = true;
+            }
+            if (targetState === this.state) {
+                this.cancelViewButton.disabled = true;
+                this.status.textContent = canRetry
+                    ? 'The view changed elsewhere. Retrying...'
+                    : 'The view changed elsewhere. Edit a filter or sort to retry.';
+            }
+            this.sendQueuedView(targetState);
         } else if (message.type === 'requestError') {
             targetState.pendingPages.clear();
             const failedPendingView = targetState.pendingView?.requestId === message.requestId;
             if (failedPendingView) {
                 targetState.pendingView = undefined;
             }
-            if (targetState === this.state) {
-                if (failedPendingView) {
-                    this.renderHeader();
-                }
-                this.status.textContent = message.message;
-                this.status.classList.add('error');
+            const table = message.status?.tables.find(candidate => candidate.id === targetState.table.id);
+            const preserveDraft = targetState.queuedView
+                || failedPendingView
+                || targetState.pendingView !== undefined
+                || targetState.filterTimer !== undefined;
+            const synchronized = message.status
+                && this.synchronizeReadyView(targetState, table, preserveDraft);
+            if (synchronized
+                && failedPendingView
+                && !targetState.queuedView
+                && targetState.automaticViewRetries < MAX_AUTOMATIC_VIEW_RETRIES) {
+                targetState.automaticViewRetries += 1;
+                targetState.queuedView = true;
             }
+            if (targetState === this.state) {
+                if (synchronized) {
+                    this.updateCanvasSize();
+                    this.updateFilterButton();
+                    this.renderHeader();
+                    this.updateStatus('The result view changed in another editor.');
+                    this.renderRows();
+                } else {
+                    if (failedPendingView) {
+                        this.renderHeader();
+                        this.cancelViewButton.disabled = true;
+                    }
+                    this.status.textContent = message.message;
+                    this.status.classList.add('error');
+                }
+            }
+            this.sendQueuedView(targetState);
         }
     }
 
-    toggleSort(columnIndex) {
-        if (this.state.pendingView) {
-            return;
+    synchronizeReadyView(state, table, preserveDraft) {
+        const view = table?.view;
+        if (view?.readyRevision === undefined) {
+            return false;
         }
+        state.revision = view.readyRevision;
+        state.nextRevision = Math.max(state.nextRevision, view.revision);
+        state.totalRows = view.readyMatchedRows ?? table.totalRows ?? table.rowsRead ?? 0;
+        state.filters = filtersToMap(view.readyFilters ?? []);
+        state.sort = view.readySorts?.[0];
+        state.pages.clear();
+        state.pendingPages.clear();
+        state.selection = undefined;
+        if (!preserveDraft) {
+            state.draftFilters = cloneFilters(state.filters);
+            state.draftSort = state.sort;
+            state.filterErrors.clear();
+        }
+        return true;
+    }
+
+    toggleSort(columnIndex) {
         let requestedSort;
-        if (this.state.sort?.columnIndex === columnIndex) {
-            if (this.state.sort.direction === 'ascending') {
+        if (this.state.draftSort?.columnIndex === columnIndex) {
+            if (this.state.draftSort.direction === 'ascending') {
                 requestedSort = { columnIndex, direction: 'descending' };
             }
         } else {
             requestedSort = { columnIndex, direction: 'ascending' };
         }
-        const revision = this.state.revision + 1;
-        const requestId = this.post('setSort', {
-            revision,
-            sorts: requestedSort ? [requestedSort] : [],
-        });
-        this.state.pendingView = { sort: requestedSort, revision, requestId };
+        this.state.draftSort = requestedSort;
         this.renderHeader();
-        this.updateStatus('Sorting...');
+        this.queueViewChange('Updating view...');
+    }
+
+    updateFilter(columnIndex, pattern, input) {
+        const existing = this.state.draftFilters.get(columnIndex);
+        if (pattern.length === 0) {
+            this.state.draftFilters.delete(columnIndex);
+        } else {
+            this.state.draftFilters.set(columnIndex, {
+                pattern,
+                caseSensitive: existing?.caseSensitive ?? false,
+            });
+        }
+        this.state.filterErrors.delete(columnIndex);
+        input.classList.remove('invalid');
+        input.removeAttribute('aria-invalid');
+        input.title = 'Regular expression. Null values are matched as an empty string.';
+        this.updateFilterButton();
+        this.queueViewChange('Filtering...', true);
+    }
+
+    toggleFilterCase(columnIndex) {
+        const existing = this.state.draftFilters.get(columnIndex);
+        if (!existing) {
+            return;
+        }
+        this.state.draftFilters.set(columnIndex, {
+            ...existing,
+            caseSensitive: !existing.caseSensitive,
+        });
+        this.renderHeader();
+        this.queueViewChange('Filtering...');
+    }
+
+    clearFilters() {
+        if (this.state.draftFilters.size === 0) {
+            return;
+        }
+        this.state.draftFilters.clear();
+        this.state.filterErrors.clear();
+        this.updateFilterButton();
+        this.renderHeader();
+        this.queueViewChange('Clearing filters...');
+    }
+
+    queueViewChange(status, debounce = false) {
+        const state = this.state;
+        state.automaticViewRetries = 0;
+        clearTimeout(state.filterTimer);
+        this.updateStatus(status);
+        if (state.pendingView) {
+            state.queuedView = true;
+            return;
+        }
+        if (debounce) {
+            state.filterTimer = setTimeout(() => this.sendViewChange(state), FILTER_DEBOUNCE_MS);
+        } else {
+            this.sendViewChange(state);
+        }
+    }
+
+    sendViewChange(state) {
+        clearTimeout(state.filterTimer);
+        state.filterTimer = undefined;
+        if (state.pendingView) {
+            state.queuedView = true;
+            return;
+        }
+        const revision = state.nextRevision + 1;
+        const filters = cloneFilters(state.draftFilters);
+        const sort = state.draftSort;
+        const requestId = this.post('setView', {
+            revision,
+            filters: [...filters].map(([columnIndex, value]) => ({
+                columnIndex,
+                pattern: value.pattern,
+                caseSensitive: value.caseSensitive,
+            })),
+            sorts: sort ? [sort] : [],
+        }, state);
+        state.pendingView = { sort, filters, revision, requestId };
+        if (state === this.state) {
+            this.cancelViewButton.disabled = false;
+        }
+    }
+
+    sendQueuedView(state) {
+        if (!state.queuedView) {
+            return;
+        }
+        state.queuedView = false;
+        this.sendViewChange(state);
+    }
+
+    updateFilterButton() {
+        this.clearFiltersButton.disabled = this.state.draftFilters.size === 0;
+    }
+
+    updateFilterValidation() {
+        for (const input of this.headerRow.querySelectorAll('.kusto-grid-filter input')) {
+            const columnIndex = Number(input.dataset.columnIndex);
+            const error = this.state.filterErrors.get(columnIndex);
+            input.classList.toggle('invalid', Boolean(error));
+            if (error) {
+                input.setAttribute('aria-invalid', 'true');
+                input.title = error;
+            } else {
+                input.removeAttribute('aria-invalid');
+                input.title = 'Regular expression. Null values are matched as an empty string.';
+            }
+        }
+    }
+
+    cancelViewChange() {
+        if (!this.state.pendingView) {
+            return;
+        }
+        clearTimeout(this.state.filterTimer);
+        this.state.filterTimer = undefined;
+        this.state.queuedView = false;
+        this.state.draftSort = this.state.sort;
+        this.state.draftFilters = cloneFilters(this.state.filters);
+        this.state.filterErrors.clear();
+        this.cancelViewButton.disabled = true;
+        this.updateFilterButton();
+        this.renderHeader();
+        this.updateStatus('Cancelling update...');
+        this.post('cancelView', {});
     }
 
     beginResize(event, columnIndex) {
@@ -454,7 +782,7 @@ class ResultGrid {
         });
     }
 
-    post(type, body) {
+    post(type, body, state = this.state) {
         this.requestNumber += 1;
         const requestId = `${this.outputId}-${this.requestNumber}`;
         this.context.postMessage({
@@ -462,8 +790,8 @@ class ResultGrid {
             requestId,
             outputId: this.outputId,
             sessionId: this.sessionId,
-            tableId: this.state.table.id,
-            viewRevision: this.state.revision,
+            tableId: state.table.id,
+            viewRevision: state.revision,
             ...body,
         });
         return requestId;
@@ -472,6 +800,7 @@ class ResultGrid {
     updateCanvasSize() {
         this.canvas.style.height = `${this.state.totalRows * ROW_HEIGHT}px`;
         this.canvas.style.width = `${this.totalWidth()}px`;
+        this.scroller.setAttribute('aria-rowcount', String(this.state.totalRows + 1));
     }
 
     totalWidth() {
@@ -483,8 +812,14 @@ class ResultGrid {
 
     updateStatus(message) {
         this.status.classList.remove('error');
-        this.status.textContent = message
-            ?? `${this.state.totalRows.toLocaleString()} row${this.state.totalRows === 1 ? '' : 's'}`;
+        if (message) {
+            this.status.textContent = message;
+            return;
+        }
+        const totalRows = this.state.table.totalRows ?? this.state.table.rowsRead ?? this.state.totalRows;
+        this.status.textContent = this.state.filters.size > 0
+            ? `${this.state.totalRows.toLocaleString()} of ${totalRows.toLocaleString()} rows`
+            : `${this.state.totalRows.toLocaleString()} row${this.state.totalRows === 1 ? '' : 's'}`;
     }
 
     evictDistantPages(firstVisibleRow) {
@@ -500,9 +835,29 @@ class ResultGrid {
     }
 
     dispose() {
+        for (const state of this.tableStates.values()) {
+            clearTimeout(state.filterTimer);
+        }
         this.disposables.forEach(disposable => disposable());
         this.disposables = [];
     }
+}
+
+function cloneFilters(filters) {
+    return new Map([...filters].map(([columnIndex, value]) => [
+        columnIndex,
+        { ...value },
+    ]));
+}
+
+function filtersToMap(filters) {
+    return new Map(filters.map(filter => [
+        filter.columnIndex,
+        {
+            pattern: filter.pattern,
+            caseSensitive: filter.caseSensitive,
+        },
+    ]));
 }
 
 function defaultColumnWidth(column) {
@@ -563,7 +918,7 @@ function installStyles() {
             overflow: hidden; border: 1px solid var(--vscode-panel-border);
             border-bottom: 0; background: var(--vscode-editorGroupHeader-tabsBackground);
         }
-        .kusto-grid-header { display: flex; height: 38px; will-change: transform; }
+        .kusto-grid-header { display: flex; height: 66px; will-change: transform; }
         .kusto-grid-corner, .kusto-grid-header-cell, .kusto-grid-row-number, .kusto-grid-cell {
             box-sizing: border-box; flex: none; border-right: 1px solid var(--vscode-panel-border);
         }
@@ -574,13 +929,32 @@ function installStyles() {
         }
         .kusto-grid-corner { padding-top: 11px; }
         .kusto-grid-header-cell {
-            position: relative; display: grid; grid-template-columns: 1fr auto; grid-template-rows: 21px 15px;
-            padding: 2px 8px; user-select: none; cursor: pointer;
+            position: relative; display: flex; flex-direction: column;
+            padding: 2px 5px 4px; user-select: none;
             color: var(--vscode-editor-foreground);
+        }
+        .kusto-grid-header-label {
+            display: grid; grid-template-columns: 1fr auto; grid-template-rows: 19px 13px;
+            padding: 0 3px; cursor: pointer;
         }
         .kusto-grid-header-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
         .kusto-grid-column-type { grid-row: 2; font-size: 10px; color: var(--vscode-descriptionForeground); }
         .kusto-grid-sort { padding-left: 4px; }
+        .kusto-grid-filter { display: flex; height: 24px; margin-top: 2px; }
+        .kusto-grid-filter input {
+            box-sizing: border-box; width: 100%; min-width: 0; height: 24px;
+            color: var(--vscode-input-foreground); background: var(--vscode-input-background);
+            border: 1px solid var(--vscode-input-border, transparent); padding: 2px 5px; outline: none;
+        }
+        .kusto-grid-filter input:focus { border-color: var(--vscode-focusBorder); }
+        .kusto-grid-filter input.invalid { border-color: var(--vscode-inputValidation-errorBorder); }
+        .kusto-grid-filter-case {
+            flex: none; width: 30px; height: 24px; padding: 0; border: 1px solid var(--vscode-input-border, transparent);
+            color: var(--vscode-descriptionForeground); background: var(--vscode-button-secondaryBackground); cursor: pointer;
+        }
+        .kusto-grid-filter-case.active {
+            color: var(--vscode-button-foreground); background: var(--vscode-button-background);
+        }
         .kusto-grid-resize { position: absolute; top: 0; right: -3px; width: 7px; height: 100%; cursor: col-resize; }
         .kusto-grid-scroller {
             position: relative; height: 340px; resize: vertical; overflow: auto;

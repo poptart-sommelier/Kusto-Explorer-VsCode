@@ -57,7 +57,7 @@ export interface IServer {
     startResultSession(params: StartResultSessionParams): Promise<StartResultSessionResult>;
     cancelResultSessionOperation(params: CancelResultSessionOperationParams): Promise<CancelResultSessionOperationResult>;
     getResultSessionStatus(params: GetResultSessionStatusParams): Promise<ResultSessionStatus>;
-    setResultSessionView(params: SetResultSessionViewParams): Promise<SetResultSessionViewResult>;
+    setResultSessionView(params: SetResultSessionViewParams, token?: CancellationToken): Promise<SetResultSessionViewResult>;
     getResultSessionPage(params: GetResultSessionPageParams): Promise<ResultSessionPage>;
     getResultSessionProjection(params: GetResultSessionProjectionParams): Promise<ResultSessionProjection>;
     disposeResultSession(params: DisposeResultSessionParams): Promise<DisposeResultSessionResult>;
@@ -398,8 +398,8 @@ export class Server implements IServer {
         return this.client.sendRequest<ResultSessionStatus>(RESULT_SESSION_METHODS.status, params);
     }
 
-    setResultSessionView(params: SetResultSessionViewParams): Promise<SetResultSessionViewResult> {
-        return this.client.sendRequest<SetResultSessionViewResult>(RESULT_SESSION_METHODS.setView, params);
+    setResultSessionView(params: SetResultSessionViewParams, token?: CancellationToken): Promise<SetResultSessionViewResult> {
+        return this.client.sendRequest<SetResultSessionViewResult>(RESULT_SESSION_METHODS.setView, params, token);
     }
 
     getResultSessionPage(params: GetResultSessionPageParams): Promise<ResultSessionPage> {
