@@ -29,6 +29,8 @@ The new workflow must make it practical to:
 5. Explicitly offer a server-side rerun when an exact snapshot is too large to send back.
 6. Create follow-on KQL through right-click enrichment actions.
 7. Keep generated queries visible and editable so investigations remain understandable and auditable.
+8. Make wide and long result values practical to inspect without an arbitrary narrow column-width cap.
+9. As a stretch goal, allow Python cells to analyze KQL results as pandas DataFrames.
 
 ## Confirmed product decisions
 
@@ -102,6 +104,10 @@ The result grid will:
 - Request result pages as the user scrolls.
 - Preserve Kusto scalar types instead of converting the whole result to display strings up front.
 - Support column resize, reorder, sorting, copying, and row or cell selection.
+- Allow columns to be widened as far as the user needs, with horizontal scrolling instead of a low
+  fixed maximum width.
+- Provide an auto-fit action that sizes a column from its heading and widest loaded display value;
+  manual resizing remains available when values are wider than the sampled page.
 - Show row counts for both the complete snapshot and the currently filtered view.
 - Show filter progress and allow an in-progress filter operation to be cancelled.
 - Preserve stable row ordering unless the user explicitly sorts.
@@ -116,9 +122,16 @@ Proposed initial display defaults:
 
 These are implementation defaults, not immutable file-format behavior.
 
-### Continuing from filtered results
+### Creating cells from results
 
-The notebook will expose a **Continue in new cell** action for selected or filtered rows.
+The notebook will expose **Create cell from results** as the general action. Its visible label should
+describe the current scope:
+
+- **Create cell from selection** for a rectangular selection.
+- **Create cell from filtered results** when filters are active.
+- **Create cell from all results** for the complete ready view.
+
+Avoid **Continue results** because it does not explain that the action creates a new editable cell.
 
 #### Exact snapshot path
 
@@ -443,6 +456,23 @@ Exit criteria:
 - A live rerun cannot occur without explicit user confirmation.
 - Unsupported regex translations are reported rather than silently changed.
 
+### Near-term follow-up: Result-grid usability
+
+Deliverables:
+
+- Rename the continuation control to the scope-specific **Create cell from...** labels above.
+- Remove the current low maximum column width.
+- Keep manual drag resizing available up to the practical canvas and browser limits.
+- Add column auto-fit based on the heading and widest loaded display value.
+- Preserve horizontal scrolling, virtualization, and saved in-session widths for very wide tables.
+
+Exit criteria:
+
+- A user can widen a column enough to read long values without truncation imposed by the extension.
+- Auto-fit produces a useful width for the values currently available without scanning or copying the
+  complete result into the renderer.
+- Renaming the action does not change exact-snapshot or live-rerun safety behavior.
+
 ### Phase 6: Enrichment action registry
 
 Deliverables:
@@ -477,6 +507,29 @@ Exit criteria:
 - Notebook behavior is reliable for the target dataset.
 - Temporary result data is removed after disposal.
 - Documentation clearly distinguishes local snapshots from live reruns.
+
+### Stretch goal: Python and pandas interoperability
+
+The notebook should eventually support KQL, Python, and Markdown cells, with the language/runtime
+shown clearly on every code cell. Python support should use the user's selected VS Code Jupyter
+kernel rather than bundling another Python runtime.
+
+Proposed behavior:
+
+- A KQL result, filtered view, or rectangular selection can be made available to a Python cell as a
+  typed pandas DataFrame.
+- The generated Python cell names its input DataFrame explicitly and remains visible and editable.
+- Python-generated DataFrames can be used by later Python cells.
+- Moving Python DataFrame values back into KQL follows the same typed `datatable()`, UTF-8 budget,
+  privacy warning, and live-rerun rules as other result continuations.
+- Large transfers use an explicitly measured row/byte budget and a benchmarked typed transport; do
+  not copy an unbounded result through notebook output JSON.
+- Cancelling a cell, closing the notebook, or restarting its kernel releases associated transfer and
+  result-session state.
+
+This is a post-hardening stretch goal. It requires design work for kernel lifecycle, DataFrame type
+mapping, dependency discovery, cancellation, memory limits, and trust/security boundaries before an
+implementation phase is committed.
 
 ## Performance and reliability targets
 
