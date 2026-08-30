@@ -2112,6 +2112,14 @@ public class Server : LspServer, ILogger, ISettingSource, IStorage, IAuthenticat
         return _resultSessionManager.GetProjectionAsync(@params, cancellationToken);
     }
 
+    [JsonRpcMethod(ResultSessionProtocol.ContinuationMethod, UseSingleObjectParameterDeserialization = true)]
+    public Task<CreateResultSessionContinuationResult> OnCreateResultSessionContinuationAsync(
+        CreateResultSessionContinuationParams @params,
+        CancellationToken cancellationToken)
+    {
+        return _resultSessionManager.CreateContinuationAsync(@params, cancellationToken);
+    }
+
     [JsonRpcMethod(ResultSessionProtocol.DisposeMethod, UseSingleObjectParameterDeserialization = true)]
     public Task<DisposeResultSessionResult> OnDisposeResultSessionAsync(
         DisposeResultSessionParams @params)

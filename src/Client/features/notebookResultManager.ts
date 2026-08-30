@@ -3,12 +3,15 @@
 
 import * as vscode from 'vscode';
 import type { IClipboard } from './clipboard';
+import type { KustoNotebookManager } from './kustoNotebookManager';
 import {
     RESULT_SESSION_MAX_PAGE_SIZE,
     RESULT_SESSION_MAX_PROJECTION_PAGE_SIZE,
     RESULT_SESSION_PROTOCOL_VERSION,
     type ResultSessionColumnFilter,
     type ResultSessionColumnSort,
+    type ResultSessionProjectionScope,
+    type ResultSessionRowRange,
     type ResultSessionStatus,
 } from './resultSession';
 import type { IServer } from './server';
@@ -20,6 +23,8 @@ export const KUSTO_NOTEBOOK_RESULT_RENDERER_ID = 'msKustoExplorer.kqlNotebookRes
 const STATUS_POLL_INTERVAL_MS = 100;
 const MAX_COPY_ROWS = 100_000;
 const MAX_COPY_CHARACTERS = 10_000_000;
+const LARGE_SNAPSHOT_WARNING_ROWS = 1_000;
+const LARGE_SNAPSHOT_WARNING_BYTES = 48 * 1_024;
 
 interface ActiveResultSession {
     notebookUri: string;
@@ -27,7 +32,7 @@ interface ActiveResultSession {
 }
 
 interface RendererRequest {
-    type: 'page' | 'setView' | 'cancelView' | 'copy';
+    type: 'page' | 'setView' | 'cancelView' | 'copy' | 'continue';
     requestId: string;
     outputId: string;
     sessionId: string;
@@ -58,6 +63,13 @@ interface CopyRequest extends RendererRequest {
     columnIndexes: number[];
 }
 
+interface ContinueRequest extends RendererRequest {
+    type: 'continue';
+    scope: ResultSessionProjectionScope;
+    rowRanges?: ResultSessionRowRange[];
+    columnIndexes: number[];
+}
+
 export class NotebookResultManager implements vscode.Disposable {
     private readonly messaging: vscode.NotebookRendererMessaging;
     private readonly disposables: vscode.Disposable[];
@@ -71,6 +83,7 @@ export class NotebookResultManager implements vscode.Disposable {
         context: vscode.ExtensionContext,
         private readonly server: IServer,
         private readonly clipboard: IClipboard,
+        private readonly notebookManager: KustoNotebookManager,
     ) {
         this.messaging = vscode.notebooks.createRendererMessaging(KUSTO_NOTEBOOK_RESULT_RENDERER_ID);
         this.disposables = [
@@ -388,9 +401,14 @@ export class NotebookResultManager implements vscode.Disposable {
                     }
                     viewCancellation.dispose();
                 }
-            } else {
+            } else if (request.type === 'copy') {
                 const copiedRows = await this.copyProjection(request);
                 await this.reply(event.editor, request, { type: 'copyResult', copiedRows });
+            } else {
+                const kind = await this.continueInNewCell(event.editor, request);
+                await this.reply(event.editor, request, kind
+                    ? { type: 'continuationResult', kind }
+                    : { type: 'continuationCancelled' });
             }
         } catch (error) {
             if (request.type === 'setView'
@@ -435,7 +453,9 @@ export class NotebookResultManager implements vscode.Disposable {
                     message = `${message} The current result view could not be recovered: ${recoveryMessage}`;
                 }
             }
-            if (request.type === 'page' || request.type === 'copy') {
+            if (request.type === 'page'
+                || request.type === 'copy'
+                || request.type === 'continue') {
                 try {
                     status = await this.server.getResultSessionStatus({
                         sessionId: request.sessionId,
@@ -562,6 +582,90 @@ export class NotebookResultManager implements vscode.Disposable {
         return copiedRows;
     }
 
+    private async continueInNewCell(
+        editor: vscode.NotebookEditor,
+        request: ContinueRequest,
+    ): Promise<'exactSnapshot' | 'liveRerun' | undefined> {
+        const sourceCell = this.findSourceCell(editor.notebook, request.sessionId);
+        const result = await this.server.createResultSessionContinuation({
+            sessionId: request.sessionId,
+            tableId: request.tableId,
+            viewRevision: request.viewRevision,
+            scope: request.scope,
+            ...(request.rowRanges ? { rowRanges: request.rowRanges } : {}),
+            columnIndexes: request.columnIndexes,
+        });
+
+        if (result.snapshotQuery) {
+            if (result.projectedRows >= LARGE_SNAPSHOT_WARNING_ROWS
+                || result.snapshotTextBytes >= LARGE_SNAPSHOT_WARNING_BYTES) {
+                const choice = await vscode.window.showWarningMessage(
+                    `This exact snapshot will embed ${result.projectedRows.toLocaleString()} rows (${formatBytes(result.snapshotTextBytes)}) in the notebook. Create it?`,
+                    {
+                        modal: true,
+                        detail: 'Snapshot values will be saved in the notebook and may appear in service query logs when the generated cell is run.',
+                    },
+                    'Create snapshot cell',
+                );
+                if (choice !== 'Create snapshot cell') {
+                    return undefined;
+                }
+            }
+            await this.notebookManager.insertContinuationCell(
+                editor,
+                sourceCell,
+                result.snapshotQuery,
+                'exactSnapshot',
+            );
+            return 'exactSnapshot';
+        }
+
+        if (!result.liveRerunQuery) {
+            throw new Error(result.liveRerunUnavailableReason
+                ?? 'The selected results are too large to continue within this service\'s safe query-text limit.');
+        }
+
+        const budget = formatBytes(result.queryTextBudgetBytes);
+        const selected = request.scope === 'selection' ? 'selected rows' : 'filtered results';
+        const choice = await vscode.window.showWarningMessage(
+            `The ${selected} cannot be embedded within the ${budget} safety budget. Generate a live rerun cell instead?`,
+            {
+                modal: true,
+                detail: 'The new cell will run the original query again. Added, removed, or changed server rows may produce different results. Review the generated KQL before running it.',
+            },
+            'Generate live rerun cell',
+        );
+        if (choice !== 'Generate live rerun cell') {
+            return undefined;
+        }
+
+        await this.notebookManager.insertContinuationCell(
+            editor,
+            sourceCell,
+            result.liveRerunQuery,
+            'liveRerun',
+        );
+        return 'liveRerun';
+    }
+
+    private findSourceCell(
+        notebook: vscode.NotebookDocument,
+        sessionId: string,
+    ): vscode.NotebookCell {
+        const notebookUri = notebook.uri.toString();
+        const cellUri = [...this.sessionsByCell.entries()]
+            .find(([, session]) =>
+                session.notebookUri === notebookUri
+                && session.sessionId === sessionId)?.[0];
+        const cell = cellUri
+            ? notebook.getCells().find(candidate => candidate.document.uri.toString() === cellUri)
+            : undefined;
+        if (!cell) {
+            throw new Error('The source cell for this result session no longer exists.');
+        }
+        return cell;
+    }
+
     private async reply(
         editor: vscode.NotebookEditor,
         request: RendererRequest,
@@ -579,7 +683,7 @@ export class NotebookResultManager implements vscode.Disposable {
 
 function parseRendererRequest(
     value: unknown,
-): PageRequest | ViewRequest | CancelViewRequest | CopyRequest | undefined {
+): PageRequest | ViewRequest | CancelViewRequest | CopyRequest | ContinueRequest | undefined {
     if (!isRecord(value)
         || typeof value.requestId !== 'string'
         || typeof value.outputId !== 'string'
@@ -631,8 +735,31 @@ function parseRendererRequest(
             columnIndexes: value.columnIndexes,
         };
     }
+    if (value.type === 'continue'
+        && (value.scope === 'filtered' || value.scope === 'selection')
+        && (value.rowRanges === undefined
+            || (Array.isArray(value.rowRanges) && value.rowRanges.every(isRowRange)))
+        && Array.isArray(value.columnIndexes)
+        && value.columnIndexes.length > 0
+        && value.columnIndexes.every(isNonNegativeInteger)
+        && (value.scope !== 'selection'
+            || (Array.isArray(value.rowRanges) && value.rowRanges.length > 0))) {
+        return {
+            ...common,
+            type: 'continue',
+            scope: value.scope,
+            ...(value.rowRanges ? { rowRanges: value.rowRanges } : {}),
+            columnIndexes: value.columnIndexes,
+        };
+    }
 
     return undefined;
+}
+
+function formatBytes(bytes: number): string {
+    return bytes >= 1024
+        ? `${Math.round(bytes / 1024).toLocaleString()} KiB`
+        : `${bytes.toLocaleString()} bytes`;
 }
 
 function viewCancellationKey(

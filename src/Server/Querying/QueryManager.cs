@@ -324,6 +324,8 @@ public class QueryManager : IQueryManager
         {
             Query = query,
             ExecuteResult = executeResult,
+            QueryOptions = context.Options,
+            QueryParameters = context.Parameters,
             Error = executeResult.Diagnostics?.FirstOrDefault()
         };
     }

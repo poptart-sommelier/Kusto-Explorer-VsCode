@@ -421,6 +421,11 @@ Exit criteria:
 
 ### Phase 5: Snapshot continuation
 
+Status: implemented. The result grid can continue a rectangular selection or the complete ready
+filtered view into a labeled notebook cell. Exact snapshots remain local until the generated cell is
+run. Oversized filtered views offer a capability-checked live rerun only after an explicit warning;
+oversized selections and unsafe translations fail with a clear explanation.
+
 Deliverables:
 
 - Project selected or filtered rows from a result session.

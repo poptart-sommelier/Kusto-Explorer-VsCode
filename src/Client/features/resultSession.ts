@@ -14,6 +14,7 @@ export const RESULT_SESSION_METHODS = {
     setView: 'kusto/setResultSessionView',
     page: 'kusto/getResultSessionPage',
     projection: 'kusto/getResultSessionProjection',
+    continuation: 'kusto/createResultSessionContinuation',
     dispose: 'kusto/disposeResultSession',
 } as const;
 
@@ -193,6 +194,25 @@ export interface ResultSessionProjection {
     offset: number;
     projectedRows: number;
     hasMore: boolean;
+}
+
+export interface CreateResultSessionContinuationParams {
+    sessionId: string;
+    tableId: string;
+    viewRevision: number;
+    scope: ResultSessionProjectionScope;
+    rowRanges?: ResultSessionRowRange[];
+    columnIndexes: number[];
+}
+
+export interface CreateResultSessionContinuationResult {
+    snapshotQuery?: string;
+    snapshotTextBytes: number;
+    queryTextBudgetBytes: number;
+    projectedRows: number;
+    liveRerunQuery?: string;
+    liveRerunTextBytes?: number;
+    liveRerunUnavailableReason?: string;
 }
 
 export interface DisposeResultSessionParams {

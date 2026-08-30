@@ -5,9 +5,11 @@ using System.Collections.Concurrent;
 using System.Collections.Immutable;
 using System.Data;
 using System.Globalization;
+using System.Text;
 using System.Text.RegularExpressions;
 using Kusto.Data.Common;
 using Kusto.Language.Editor;
+using Kusto.Language.Symbols;
 
 namespace Kusto.Vscode;
 
@@ -408,6 +410,64 @@ public sealed class ResultSessionManager : IResultSessionManager
         }
     }
 
+    public Task<CreateResultSessionContinuationResult> CreateContinuationAsync(
+        CreateResultSessionContinuationParams parameters,
+        CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(parameters);
+        cancellationToken.ThrowIfCancellationRequested();
+        var session = GetSession(parameters.SessionId);
+
+        lock (session.SyncRoot)
+        {
+            session.Touch();
+            var table = GetCompletedTable(session, parameters.TableId);
+            ValidateViewRevision(table, parameters.ViewRevision);
+            ValidateColumnIndexes(table, parameters.ColumnIndexes);
+            var projectionMap = GetProjectionMap(
+                table,
+                parameters.Scope,
+                parameters.RowRanges);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var budget = GetQueryTextBudgetBytes(session.EffectiveCluster);
+            var snapshot = GenerateSnapshot(
+                table,
+                projectionMap,
+                parameters.ColumnIndexes,
+                budget,
+                cancellationToken);
+            if (snapshot.Query != null)
+            {
+                return Task.FromResult(new CreateResultSessionContinuationResult
+                {
+                    SnapshotQuery = snapshot.Query,
+                    SnapshotTextBytes = snapshot.TextBytes,
+                    QueryTextBudgetBytes = budget,
+                    ProjectedRows = projectionMap.Count
+                });
+            }
+
+            var liveRerun = GenerateLiveRerun(
+                session,
+                table,
+                parameters.Scope,
+                parameters.ColumnIndexes,
+                budget,
+                cancellationToken);
+            return Task.FromResult(new CreateResultSessionContinuationResult
+            {
+                SnapshotTextBytes = snapshot.TextBytes,
+                QueryTextBudgetBytes = budget,
+                ProjectedRows = projectionMap.Count,
+                LiveRerunQuery = liveRerun.Query,
+                LiveRerunTextBytes = liveRerun.TextBytes,
+                LiveRerunUnavailableReason = liveRerun.UnavailableReason
+            });
+        }
+    }
+
     public Task<DisposeResultSessionResult> DisposeAsync(
         DisposeResultSessionParams parameters)
     {
@@ -510,6 +570,11 @@ public sealed class ResultSessionManager : IResultSessionManager
                 session.Tables = tables
                     .Select((data, index) => new SessionTable($"table-{index}", data))
                     .ToImmutableList();
+                session.ExecutedQuery = runResult.Query.ToString();
+                session.BaselineQueryOptions = options;
+                session.FinalQueryOptions = runResult.QueryOptions ?? options;
+                session.FinalQueryParameters = runResult.QueryParameters
+                    ?? ImmutableDictionary<string, string>.Empty;
                 session.EffectiveCluster = runResult.Cluster ?? session.Parameters.Cluster;
                 session.EffectiveDatabase = runResult.Database ?? session.Parameters.Database;
                 session.EffectiveConnection = runResult.Connection;
@@ -827,46 +892,54 @@ public sealed class ResultSessionManager : IResultSessionManager
         SessionTable table,
         GetResultSessionProjectionParams parameters)
     {
-        switch (parameters.Scope)
+        return GetProjectionMap(table, parameters.Scope, parameters.RowRanges);
+    }
+
+    private static ProjectionMap GetProjectionMap(
+        SessionTable table,
+        string scope,
+        ImmutableList<ResultSessionRowRange>? rowRanges)
+    {
+        switch (scope)
         {
             case ResultSessionContractValues.ProjectionAll:
-                if (parameters.RowRanges is { Count: > 0 })
+                if (rowRanges is { Count: > 0 })
                     throw new ArgumentException("rowRanges are only valid for selection projections.");
                 return new ProjectionMap(
                     table.Data.Rows.Count,
                     position => checked((int)position));
 
             case ResultSessionContractValues.ProjectionFiltered:
-                if (parameters.RowRanges is { Count: > 0 })
+                if (rowRanges is { Count: > 0 })
                     throw new ArgumentException("rowRanges are only valid for selection projections.");
                 return new ProjectionMap(
                     table.ViewSourceIndexes.LongLength,
                     position => table.ViewSourceIndexes[position]);
 
             case ResultSessionContractValues.ProjectionSelection:
-                if (parameters.RowRanges == null)
+                if (rowRanges == null)
                     throw new ArgumentException("Selection projections require rowRanges.");
 
                 long selectedCount = 0;
-                foreach (var range in parameters.RowRanges)
+                foreach (var range in rowRanges)
                 {
                     if (range.Offset < 0 || range.Count < 0)
-                        throw new ArgumentOutOfRangeException(nameof(parameters.RowRanges));
+                        throw new ArgumentOutOfRangeException(nameof(rowRanges));
                     if (range.Offset > table.ViewSourceIndexes.LongLength
                         || range.Count > table.ViewSourceIndexes.LongLength - range.Offset)
                     {
                         throw new ArgumentOutOfRangeException(
-                            nameof(parameters.RowRanges),
+                            nameof(rowRanges),
                             "A selection row range is outside the current view.");
                     }
                     if (range.Count > long.MaxValue - selectedCount)
-                        throw new ArgumentOutOfRangeException(nameof(parameters.RowRanges));
+                        throw new ArgumentOutOfRangeException(nameof(rowRanges));
                     selectedCount += range.Count;
                 }
 
                 return new ProjectionMap(selectedCount, position =>
                 {
-                    foreach (var range in parameters.RowRanges)
+                    foreach (var range in rowRanges)
                     {
                         if (position < range.Count)
                             return table.ViewSourceIndexes[range.Offset + position];
@@ -877,9 +950,412 @@ public sealed class ResultSessionManager : IResultSessionManager
 
             default:
                 throw new ArgumentException(
-                    $"Unknown projection scope '{parameters.Scope}'.",
-                    nameof(parameters));
+                    $"Unknown projection scope '{scope}'.",
+                    nameof(scope));
         }
+    }
+
+    private static SnapshotGenerationResult GenerateSnapshot(
+        SessionTable table,
+        ProjectionMap projectionMap,
+        ImmutableList<int> columnIndexes,
+        int budget,
+        CancellationToken cancellationToken)
+    {
+        const string comment =
+            "// Exact snapshot of retained query results; this does not rerun against server data.\n";
+        var schema = string.Join(
+            ", ",
+            columnIndexes.Select(index =>
+            {
+                var column = table.Data.Columns[index];
+                return $"{KustoGenerator.GetIdentifier(column.ColumnName)}: {KustoGenerator.GetKustoType(column.DataType)}";
+            }));
+        var prefix = $"{comment}let LocalResult = datatable ({schema}) [\n";
+        const string suffix = "\n];\nLocalResult";
+        long textBytes = Encoding.UTF8.GetByteCount(prefix)
+            + Encoding.UTF8.GetByteCount(suffix);
+        if (textBytes > budget)
+            return new SnapshotGenerationResult(null, textBytes);
+
+        var builder = new StringBuilder(
+            prefix,
+            Math.Min(budget, prefix.Length + 1_024));
+        for (long position = 0; position < projectionMap.Count; position++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var sourceIndex = projectionMap.GetSourceIndex(position);
+            var dataRow = table.Data.Rows[sourceIndex];
+            var literals = new string[columnIndexes.Count];
+            for (var columnPosition = 0; columnPosition < columnIndexes.Count; columnPosition++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var columnIndex = columnIndexes[columnPosition];
+                var dataColumn = table.Data.Columns[columnIndex];
+                literals[columnPosition] = KustoGenerator.GetLiteral(
+                    dataRow[columnIndex],
+                    dataColumn.DataType);
+            }
+
+            var rowText = $"{(position == 0 ? string.Empty : ",\n")}    {string.Join(", ", literals)}";
+            var rowBytes = Encoding.UTF8.GetByteCount(rowText);
+            if (textBytes + rowBytes > budget)
+                return new SnapshotGenerationResult(null, textBytes + rowBytes);
+            builder.Append(rowText);
+            textBytes += rowBytes;
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        builder.Append(suffix);
+        return new SnapshotGenerationResult(builder.ToString(), textBytes);
+    }
+
+    private static LiveRerunGenerationResult GenerateLiveRerun(
+        Session session,
+        SessionTable table,
+        string scope,
+        ImmutableList<int> columnIndexes,
+        int budget,
+        CancellationToken cancellationToken)
+    {
+        if (scope == ResultSessionContractValues.ProjectionSelection)
+        {
+            return new LiveRerunGenerationResult(
+                null,
+                null,
+                "Live rerun is unavailable for an arbitrary row selection.");
+        }
+        if (scope is not ResultSessionContractValues.ProjectionAll
+            and not ResultSessionContractValues.ProjectionFiltered)
+        {
+            return new LiveRerunGenerationResult(
+                null,
+                null,
+                $"Live rerun is unavailable for projection scope '{scope}'.");
+        }
+        if (session.Tables.Count != 1)
+        {
+            return new LiveRerunGenerationResult(
+                null,
+                null,
+                "Live rerun is unavailable because the executed query returned multiple result tables, making the selected result ambiguous.");
+        }
+        if (string.IsNullOrWhiteSpace(session.ExecutedQuery))
+        {
+            return new LiveRerunGenerationResult(
+                null,
+                null,
+                "Live rerun is unavailable because the ultimately executed query was not retained.");
+        }
+        if (session.FinalQueryParameters.Count != 0)
+        {
+            return new LiveRerunGenerationResult(
+                null,
+                null,
+                "Live rerun is unavailable because source directives established query parameters that cannot be reproduced safely.");
+        }
+        if (!DictionariesEqual(
+            session.BaselineQueryOptions,
+            session.FinalQueryOptions))
+        {
+            return new LiveRerunGenerationResult(
+                null,
+                null,
+                "Live rerun is unavailable because source directives altered query options that cannot be reproduced safely.");
+        }
+        if (columnIndexes.Count == 0)
+        {
+            return new LiveRerunGenerationResult(
+                null,
+                null,
+                "Live rerun is unavailable because KQL cannot project an empty column list.");
+        }
+        if (string.IsNullOrWhiteSpace(session.EffectiveCluster)
+            || string.IsNullOrWhiteSpace(session.EffectiveDatabase))
+        {
+            return new LiveRerunGenerationResult(
+                null,
+                null,
+                "Live rerun is unavailable because the retained effective cluster and database are required to bind execution safely.");
+        }
+
+        if (scope == ResultSessionContractValues.ProjectionFiltered)
+        {
+            foreach (var filter in table.Filters)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var column = table.Columns[filter.ColumnIndex];
+                if (column.Type != ScalarTypes.String.Name)
+                {
+                    return new LiveRerunGenerationResult(
+                        null,
+                        null,
+                        $"Live rerun is unavailable because the filter on column '{column.Name}' has type '{column.Type}'; only string-column regex filters can be replayed safely.");
+                }
+                if (!filter.CaseSensitive)
+                {
+                    return new LiveRerunGenerationResult(
+                        null,
+                        null,
+                        $"Live rerun is unavailable because the filter on column '{column.Name}' is case-insensitive, whose .NET and Kusto semantics cannot be guaranteed equivalent.");
+                }
+                if (!TryValidateKustoRegex(filter.Pattern, out var regexReason))
+                {
+                    var columnName = table.Data.Columns[filter.ColumnIndex].ColumnName;
+                    return new LiveRerunGenerationResult(
+                        null,
+                        null,
+                        $"Live rerun is unavailable because the filter on column '{columnName}' uses {regexReason}.");
+                }
+            }
+            foreach (var sort in table.Sorts)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var column = table.Columns[sort.ColumnIndex];
+                if (!CanReplaySort(column.Type))
+                {
+                    return new LiveRerunGenerationResult(
+                        null,
+                        null,
+                        $"Live rerun is unavailable because the sort on column '{column.Name}' has type '{column.Type}', whose local ordering cannot be replayed exactly in KQL.");
+                }
+            }
+        }
+
+        if (HasTerminalSemicolonBeforeTrailingComment(session.ExecutedQuery))
+        {
+            return new LiveRerunGenerationResult(
+                null,
+                null,
+                "Live rerun is unavailable because the source query has trailing comment trivia after a terminal semicolon and cannot be appended safely.");
+        }
+
+        var query = session.ExecutedQuery.TrimEnd();
+        while (query.EndsWith(';'))
+            query = query[..^1].TrimEnd();
+        if (query.Length == 0)
+        {
+            return new LiveRerunGenerationResult(
+                null,
+                null,
+                "Live rerun is unavailable because the ultimately executed query is empty after removing trailing semicolons.");
+        }
+
+        var builder = new StringBuilder();
+        builder.Append("#connect cluster(");
+        builder.Append(KustoGenerator.GetStringLiteral(session.EffectiveCluster));
+        builder.Append(").database(");
+        builder.Append(KustoGenerator.GetStringLiteral(session.EffectiveDatabase));
+        builder.AppendLine(")");
+        builder.AppendLine("// LIVE RERUN: executes against current server data and may differ from the retained snapshot.");
+        builder.Append(query);
+        if (scope == ResultSessionContractValues.ProjectionFiltered)
+        {
+            foreach (var filter in table.Filters)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var columnName = KustoGenerator.GetIdentifier(
+                    table.Data.Columns[filter.ColumnIndex].ColumnName);
+                builder.Append("\n| where tostring(");
+                builder.Append(columnName);
+                builder.Append(") matches regex ");
+                builder.Append(KustoGenerator.GetStringLiteral(filter.Pattern));
+            }
+        }
+        if (scope == ResultSessionContractValues.ProjectionFiltered
+            && table.Sorts.Count != 0)
+        {
+            builder.Append("\n| order by ");
+            builder.Append(string.Join(
+                ", ",
+                table.Sorts.Select(sort =>
+                {
+                    var columnName = KustoGenerator.GetIdentifier(
+                        table.Data.Columns[sort.ColumnIndex].ColumnName);
+                    var direction = sort.Direction == ResultSessionContractValues.SortAscending
+                        ? "asc"
+                        : "desc";
+                    return $"{columnName} {direction}";
+                })));
+        }
+
+        builder.Append("\n| project ");
+        builder.Append(string.Join(
+            ", ",
+            columnIndexes.Select(index =>
+                KustoGenerator.GetIdentifier(table.Data.Columns[index].ColumnName))));
+        cancellationToken.ThrowIfCancellationRequested();
+        var liveQuery = builder.ToString();
+        var textBytes = Encoding.UTF8.GetByteCount(liveQuery);
+        if (textBytes > budget)
+        {
+            return new LiveRerunGenerationResult(
+                null,
+                textBytes,
+                $"Live rerun is unavailable because its {textBytes} UTF-8 bytes exceed the {budget}-byte query-text budget.");
+        }
+        return new LiveRerunGenerationResult(liveQuery, textBytes, null);
+    }
+
+    private static bool TryValidateKustoRegex(string pattern, out string reason)
+    {
+        if (pattern.Contains("(?", StringComparison.Ordinal))
+        {
+            reason = "an unsupported regular-expression construct beginning with '(?'";
+            return false;
+        }
+
+        var inCharacterClass = false;
+        var captureGroups = 0;
+        var previousWasUnescapedQuantifier = false;
+        for (var index = 0; index < pattern.Length; index++)
+        {
+            var character = pattern[index];
+            if (character == '\\')
+            {
+                if (++index >= pattern.Length)
+                    break;
+                var escaped = pattern[index];
+                if (escaped is >= '0' and <= '9' or 'k' or 'K' or 'g')
+                {
+                    reason = "an unsupported backreference or named reference";
+                    return false;
+                }
+                if (escaped is 'A' or 'G' or 'Z' or 'z')
+                {
+                    reason = $"the unsupported .NET-only anchor '\\{escaped}'";
+                    return false;
+                }
+                if (escaped is 'p' or 'P' or 'c')
+                {
+                    reason = $"the unsupported .NET-only class or category escape '\\{escaped}'";
+                    return false;
+                }
+                if (char.IsAsciiLetter(escaped))
+                {
+                    reason = $"the unsupported letter escape '\\{escaped}', whose .NET and Kusto Unicode semantics may differ";
+                    return false;
+                }
+                previousWasUnescapedQuantifier = false;
+                continue;
+            }
+
+            if (character == '[' && !inCharacterClass)
+            {
+                inCharacterClass = true;
+                previousWasUnescapedQuantifier = false;
+                continue;
+            }
+            if (character == ']' && inCharacterClass)
+            {
+                inCharacterClass = false;
+                previousWasUnescapedQuantifier = false;
+                continue;
+            }
+            if (inCharacterClass)
+            {
+                if (character == '-' && index + 1 < pattern.Length && pattern[index + 1] == '[')
+                {
+                    reason = "unsupported .NET character-class subtraction";
+                    return false;
+                }
+                continue;
+            }
+            if (character == '$')
+            {
+                reason = "the '$' anchor, whose final-newline semantics differ between .NET and Kusto";
+                return false;
+            }
+            if (character == '{')
+            {
+                reason = "unsupported counted-repetition syntax beginning with '{', whose Kusto limit may differ";
+                return false;
+            }
+            if (character == '(' && ++captureGroups > 16)
+            {
+                reason = "more than 16 capture groups";
+                return false;
+            }
+            if (character == '+' && previousWasUnescapedQuantifier)
+            {
+                reason = "an unsupported possessive quantifier";
+                return false;
+            }
+            previousWasUnescapedQuantifier = character is '*' or '+' or '?' or '}';
+        }
+
+        reason = string.Empty;
+        return true;
+    }
+
+    private static bool HasTerminalSemicolonBeforeTrailingComment(string query)
+    {
+        try
+        {
+            return Regex.IsMatch(
+                query,
+                @";\s*(?=//|/\*)(?:(?://[^\r\n]*(?:\r?\n|$))|(?:/\*[\s\S]*?\*/)|\s)*$",
+                RegexOptions.CultureInvariant,
+                RegexMatchTimeout);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return true;
+        }
+    }
+
+    private static bool CanReplaySort(string kustoType)
+    {
+        return kustoType is "bool"
+            or "int"
+            or "long"
+            or "decimal"
+            or "datetime"
+            or "timespan";
+    }
+
+    private static bool DictionariesEqual(
+        ImmutableDictionary<string, string> left,
+        ImmutableDictionary<string, string> right)
+    {
+        return left.Count == right.Count
+            && left.All(pair =>
+                right.TryGetValue(pair.Key, out var value)
+                && string.Equals(pair.Value, value, StringComparison.Ordinal));
+    }
+
+    private static int GetQueryTextBudgetBytes(string? effectiveCluster)
+    {
+        if (string.IsNullOrWhiteSpace(effectiveCluster))
+            return ResultSessionProtocol.ScopedQueryTextBudgetBytes;
+
+        string host;
+        if (Uri.TryCreate(effectiveCluster, UriKind.Absolute, out var absoluteUri))
+        {
+            host = absoluteUri.Host;
+        }
+        else if (Uri.TryCreate($"https://{effectiveCluster}", UriKind.Absolute, out var hostUri))
+        {
+            host = hostUri.Host;
+        }
+        else
+        {
+            return ResultSessionProtocol.ScopedQueryTextBudgetBytes;
+        }
+
+        if (host.Equals("ade.loganalytics.io", StringComparison.OrdinalIgnoreCase)
+            || host.Equals("ade.applicationinsights.io", StringComparison.OrdinalIgnoreCase))
+        {
+            return ResultSessionProtocol.ScopedQueryTextBudgetBytes;
+        }
+
+        var isNativeAdx = host.EndsWith(".kusto.windows.net", StringComparison.OrdinalIgnoreCase)
+            || host.EndsWith(".kusto.chinacloudapi.cn", StringComparison.OrdinalIgnoreCase)
+            || host.EndsWith(".kusto.usgovcloudapi.net", StringComparison.OrdinalIgnoreCase)
+            || host.EndsWith(".kusto.microsoft.scloud", StringComparison.OrdinalIgnoreCase);
+        return isNativeAdx
+            ? ResultSessionProtocol.NativeAdxQueryTextBudgetBytes
+            : ResultSessionProtocol.ScopedQueryTextBudgetBytes;
     }
 
     private static ImmutableList<ResultSessionRow> CreateRows(
@@ -1067,6 +1543,13 @@ public sealed class ResultSessionManager : IResultSessionManager
         public string? EffectiveCluster { get; set; }
         public string? EffectiveDatabase { get; set; }
         public string? EffectiveConnection { get; set; }
+        public string? ExecutedQuery { get; set; }
+        public ImmutableDictionary<string, string> BaselineQueryOptions { get; set; }
+            = ImmutableDictionary<string, string>.Empty;
+        public ImmutableDictionary<string, string> FinalQueryOptions { get; set; }
+            = ImmutableDictionary<string, string>.Empty;
+        public ImmutableDictionary<string, string> FinalQueryParameters { get; set; }
+            = ImmutableDictionary<string, string>.Empty;
         public DateTimeOffset LastAccess { get; private set; }
 
         public void Touch() => LastAccess = DateTimeOffset.UtcNow;
@@ -1160,6 +1643,15 @@ public sealed class ResultSessionManager : IResultSessionManager
     private readonly record struct ProjectionMap(
         long Count,
         Func<long, int> GetSourceIndex);
+
+    private readonly record struct SnapshotGenerationResult(
+        string? Query,
+        long TextBytes);
+
+    private readonly record struct LiveRerunGenerationResult(
+        string? Query,
+        long? TextBytes,
+        string? UnavailableReason);
 
     private sealed record CompiledFilter(
         ResultSessionColumnFilter Filter,

@@ -7,7 +7,9 @@ import type { ConnectionManager } from './connectionManager';
 import {
     isKustoNotebookConnection,
     KUSTO_NOTEBOOK_CELL_ID_METADATA_KEY,
+    KUSTO_NOTEBOOK_CONTINUATION_METADATA_KEY,
     KUSTO_NOTEBOOK_TYPE,
+    type KustoNotebookContinuationKind,
     type KustoNotebookConnection,
 } from './notebookFormat';
 
@@ -161,10 +163,75 @@ export class KustoNotebookManager implements vscode.Disposable {
         return vscode.window.showNotebookDocument(notebook);
     }
 
+    async insertContinuationCell(
+        editor: vscode.NotebookEditor,
+        sourceCell: vscode.NotebookCell,
+        query: string,
+        kind: KustoNotebookContinuationKind,
+    ): Promise<void> {
+        return this.enqueue(
+            editor.notebook,
+            () => this.insertContinuationCellCore(editor, sourceCell, query, kind),
+        );
+    }
+
+    private async insertContinuationCellCore(
+        editor: vscode.NotebookEditor,
+        sourceCell: vscode.NotebookCell,
+        query: string,
+        kind: KustoNotebookContinuationKind,
+    ): Promise<void> {
+        const cells = editor.notebook.getCells();
+        const sourceIndex = cells.findIndex(cell =>
+            cell.document.uri.toString() === sourceCell.document.uri.toString());
+        if (sourceIndex < 0) {
+            throw new Error('The source notebook cell no longer exists.');
+        }
+
+        const sourceCellId = sourceCell.metadata[KUSTO_NOTEBOOK_CELL_ID_METADATA_KEY];
+        if (typeof sourceCellId !== 'string' || sourceCellId.length === 0) {
+            throw new Error('The source notebook cell does not have a stable identifier.');
+        }
+
+        const cell = new vscode.NotebookCellData(
+            vscode.NotebookCellKind.Code,
+            query,
+            'kusto',
+        );
+        cell.metadata = {
+            [KUSTO_NOTEBOOK_CELL_ID_METADATA_KEY]: crypto.randomUUID(),
+            [KUSTO_NOTEBOOK_CONTINUATION_METADATA_KEY]: {
+                kind,
+                sourceCellId,
+            },
+        };
+        const insertionIndex = sourceIndex + 1;
+        const edit = new vscode.WorkspaceEdit();
+        edit.set(editor.notebook.uri, [
+            vscode.NotebookEdit.insertCells(insertionIndex, [cell]),
+        ]);
+        if (!await vscode.workspace.applyEdit(edit)) {
+            throw new Error('VS Code could not insert the continuation cell.');
+        }
+
+        const range = new vscode.NotebookRange(insertionIndex, insertionIndex + 1);
+        editor.selection = range;
+        editor.revealRange(range, vscode.NotebookEditorRevealType.InCenterIfOutsideViewport);
+        if (vscode.window.activeNotebookEditor === editor) {
+            void focusContinuationCell().catch(error => {
+                const message = error instanceof Error ? error.message : String(error);
+                void vscode.window.showWarningMessage(
+                    `The continuation cell was created but could not be focused: ${message}`,
+                );
+            });
+        }
+    }
+
     dispose(): void {
         for (const disposable of this.disposables) {
             disposable.dispose();
         }
+
         for (const notebookKey of this.synchronizedCells.keys()) {
             void this.clearConnections(notebookKey);
         }
@@ -241,6 +308,12 @@ export class KustoNotebookManager implements vscode.Disposable {
             await this.connections.clearTransientDocumentConnection(cellUri);
         }
     }
+}
+
+async function focusContinuationCell(): Promise<void> {
+    await vscode.commands.executeCommand('notebook.cell.edit');
+    await vscode.commands.executeCommand('cursorBottom');
+    await vscode.commands.executeCommand('cursorEnd');
 }
 
 function connectionsEqual(

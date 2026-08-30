@@ -298,8 +298,8 @@ flowchart LR
 - The renderer owns viewport and selection state and receives bounded pages only.
 - Each result table owns its own filtered-view status. Filters and sorts are submitted as a complete,
   revisioned view model, and page responses carry that revision so the client can reject stale work.
-- Projection requests are paged and use compact row ranges; copying or continuing an investigation
-  must not become an unbounded full-result response.
+- Projection requests are paged and use compact row ranges. Snapshot continuation is generated
+  directly from the retained typed table in the server, so snapshot rows never cross into TypeScript.
 - Normal pages and projection pages are capped at 1,000 rows per request in the version 1 contract.
 - Cancellation uses an operation ID, while paging, filtering, and deterministic cleanup use the
   result-session ID.
@@ -318,9 +318,10 @@ flowchart LR
 
 The version 1 cross-process shapes and stable method names are defined in
 `features/resultSession.ts` and `Utilities/ResultSessionContracts.cs`. They cover starting,
-cancelling, status/progress, applying a view, reading a page, reading a bounded projection, and
-disposing a session. `ResultSessionManager` owns the server snapshot, revisioned sort views, paging,
-bounded projections, cancellation, and cleanup. Regex filters use the same revisioned view contract:
+cancelling, status/progress, applying a view, reading a page, reading a bounded projection, creating
+a result continuation, and disposing a session. `ResultSessionManager` owns the server snapshot,
+revisioned sort views, paging, bounded projections, continuation generation, cancellation, and
+cleanup. Regex filters use the same revisioned view contract:
 filters on different columns combine with `AND`, evaluate against invariant display text, and use a
 4,096-character pattern limit, a 100 ms per-match timeout, and a five-second total evaluation limit.
 Null values match as an empty string. Invalid, timed-out, cancelled, or superseded evaluations cannot
@@ -356,10 +357,21 @@ design removes both that full construction step and the complete TypeScript/webv
 
 Generated snapshot queries must be measured as complete UTF-8 text before execution. Azure Monitor
 and Log Analytics have a practical 64 KB query-text limit; native ADX permits approximately 1 MB.
-The implementation must reserve space for query structure and use a lower service-specific safety
-budget rather than filling either documented maximum. If an exact `datatable()` snapshot does not
-fit, the UI may offer a live predicate rerun, but it must explain the semantic difference and obtain
-confirmation.
+The server uses explicit lower safety budgets of 60 KiB for scoped Azure Monitor/Log Analytics/
+Application Insights endpoints and 900 KiB for recognized native ADX endpoints; unknown clusters
+default to 60 KiB. It generates exact typed `datatable()` text incrementally and stops at the first
+known over-budget size. An oversized all/filtered snapshot may return a budget-checked live rerun
+using the ultimately executed query, compatible ready filters, and requested projection. Selection,
+ambiguous multi-table results, and filters outside the conservative common regex subset do not offer
+a live rerun. Replay is limited to case-sensitive string filters and safely reproducible sort types;
+source query parameters, altered query options, and unsafe trailing trivia are rejected explicitly.
+Generated reruns include a credential-free `#connect` directive for the retained effective cluster and
+database. The UI must explain the semantic difference and obtain confirmation.
+
+The notebook renderer sends only the continuation scope, selected row ranges, requested columns, and
+ready view revision. The extension host validates the active result session, presents snapshot or
+live-rerun warnings, and inserts the generated KQL immediately after the source cell with persisted
+continuation metadata. Result rows remain in the C# session throughout generation.
 
 ---
 

@@ -8,6 +8,7 @@ import {
 } from '../../features/kustoNotebookSerializer';
 import {
     KUSTO_NOTEBOOK_CELL_ID_METADATA_KEY,
+    KUSTO_NOTEBOOK_CONTINUATION_METADATA_KEY,
     KUSTO_NOTEBOOK_FORMAT_VERSION,
 } from '../../features/notebookFormat';
 
@@ -23,6 +24,10 @@ describe('KustoNotebookSerializer', () => {
         code.metadata = {
             [KUSTO_NOTEBOOK_CELL_ID_METADATA_KEY]: 'query-1',
             folded: false,
+            [KUSTO_NOTEBOOK_CONTINUATION_METADATA_KEY]: {
+                kind: 'exactSnapshot',
+                sourceCellId: 'source-1',
+            },
         };
         code.outputs = [new vscode.NotebookCellOutput([
             vscode.NotebookCellOutputItem.text('sensitive result'),
@@ -51,7 +56,13 @@ describe('KustoNotebookSerializer', () => {
         expect(persisted.formatVersion).toBe(KUSTO_NOTEBOOK_FORMAT_VERSION);
         expect(persisted.cells[0].id).toBe('query-1');
         expect(persisted.cells[0]).not.toHaveProperty('outputs');
-        expect(persisted.cells[0].metadata).toEqual({ folded: false });
+        expect(persisted.cells[0].metadata).toEqual({
+            folded: false,
+            [KUSTO_NOTEBOOK_CONTINUATION_METADATA_KEY]: {
+                kind: 'exactSnapshot',
+                sourceCellId: 'source-1',
+            },
+        });
         expect(restored.cells).toHaveLength(2);
         expect(restored.cells[0]?.value).toBe('StormEvents | take 10');
         expect(restored.cells[1]?.kind).toBe(vscode.NotebookCellKind.Markup);

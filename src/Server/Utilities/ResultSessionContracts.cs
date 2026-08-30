@@ -12,12 +12,15 @@ public static class ResultSessionProtocol
     public const int Version = 1;
     public const int MaxPageSize = 1_000;
     public const int MaxProjectionPageSize = 1_000;
+    public const int ScopedQueryTextBudgetBytes = 60 * 1_024;
+    public const int NativeAdxQueryTextBudgetBytes = 900 * 1_024;
     public const string StartMethod = "kusto/startResultSession";
     public const string CancelMethod = "kusto/cancelResultSessionOperation";
     public const string StatusMethod = "kusto/getResultSessionStatus";
     public const string SetViewMethod = "kusto/setResultSessionView";
     public const string PageMethod = "kusto/getResultSessionPage";
     public const string ProjectionMethod = "kusto/getResultSessionProjection";
+    public const string ContinuationMethod = "kusto/createResultSessionContinuation";
     public const string DisposeMethod = "kusto/disposeResultSession";
 }
 
@@ -439,6 +442,53 @@ public sealed class ResultSessionProjection
 
     [DataMember(Name = "hasMore")]
     public required bool HasMore { get; init; }
+}
+
+[DataContract]
+public sealed class CreateResultSessionContinuationParams
+{
+    [DataMember(Name = "sessionId")]
+    public required string SessionId { get; init; }
+
+    [DataMember(Name = "tableId")]
+    public required string TableId { get; init; }
+
+    [DataMember(Name = "viewRevision")]
+    public required long ViewRevision { get; init; }
+
+    [DataMember(Name = "scope")]
+    public required string Scope { get; init; }
+
+    [DataMember(Name = "rowRanges")]
+    public ImmutableList<ResultSessionRowRange>? RowRanges { get; init; }
+
+    [DataMember(Name = "columnIndexes")]
+    public required ImmutableList<int> ColumnIndexes { get; init; }
+}
+
+[DataContract]
+public sealed class CreateResultSessionContinuationResult
+{
+    [DataMember(Name = "snapshotQuery")]
+    public string? SnapshotQuery { get; init; }
+
+    [DataMember(Name = "snapshotTextBytes")]
+    public required long SnapshotTextBytes { get; init; }
+
+    [DataMember(Name = "queryTextBudgetBytes")]
+    public required int QueryTextBudgetBytes { get; init; }
+
+    [DataMember(Name = "projectedRows")]
+    public required long ProjectedRows { get; init; }
+
+    [DataMember(Name = "liveRerunQuery")]
+    public string? LiveRerunQuery { get; init; }
+
+    [DataMember(Name = "liveRerunTextBytes")]
+    public long? LiveRerunTextBytes { get; init; }
+
+    [DataMember(Name = "liveRerunUnavailableReason")]
+    public string? LiveRerunUnavailableReason { get; init; }
 }
 
 [DataContract]

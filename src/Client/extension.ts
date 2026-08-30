@@ -165,7 +165,12 @@ export async function activate(context: ExtensionContext)
 
     // activate native Kusto notebooks
     const notebookManager = new KustoNotebookManager(context, connectionManager);
-    const notebookResultManager = new NotebookResultManager(context, server, clipboard);
+    const notebookResultManager = new NotebookResultManager(
+        context,
+        server,
+        clipboard,
+        notebookManager,
+    );
     const notebookController = new KustoNotebookController(connectionManager, notebookManager, notebookResultManager);
     context.subscriptions.push(
         vscode.workspace.registerNotebookSerializer(

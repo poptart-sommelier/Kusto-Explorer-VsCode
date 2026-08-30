@@ -4,6 +4,7 @@
 import * as vscode from 'vscode';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { IClipboard } from '../../features/clipboard';
+import type { KustoNotebookManager } from '../../features/kustoNotebookManager';
 import {
     KUSTO_NOTEBOOK_RESULT_MIME,
     NotebookResultManager,
@@ -13,6 +14,7 @@ import { NullServer } from '../../features/server';
 
 describe('NotebookResultManager', () => {
     beforeEach(() => {
+        vi.restoreAllMocks();
         vscodeMock().__rendererMessagings.length = 0;
         vscodeMock().__notebookChangeListeners.length = 0;
         vscodeMock().__notebookCloseListeners.length = 0;
@@ -314,6 +316,183 @@ describe('NotebookResultManager', () => {
         });
     });
 
+    it('creates an exact snapshot continuation cell from the selection', async () => {
+        const server = new NullServer();
+        server.createResultSessionContinuation = vi.fn(async () => ({
+            snapshotQuery: '// Exact snapshot\nLocalResult',
+            snapshotTextBytes: 128,
+            queryTextBudgetBytes: 61_440,
+            projectedRows: 2,
+        }));
+        server.disposeResultSession = vi.fn(async () => ({ disposed: true }));
+        const insertContinuationCell = vi.fn(async () => undefined);
+        const manager = createManager(server, { insertContinuationCell });
+        const cell = createCell();
+        const notebook = createNotebook([cell]);
+        manager.prepareSession(notebook, cell, 'session-1');
+        await manager.adoptSession(notebook, cell, 'session-1');
+        const messaging = vscodeMock().__rendererMessagings[0]!;
+        const editor = { notebook };
+
+        messaging.emitter.fire({
+            editor,
+            message: {
+                type: 'continue',
+                requestId: 'continue-1',
+                outputId: 'output-1',
+                sessionId: 'session-1',
+                tableId: 'table-1',
+                viewRevision: 2,
+                scope: 'selection',
+                rowRanges: [{ offset: 4, count: 2 }],
+                columnIndexes: [1, 0],
+            },
+        });
+
+        await vi.waitFor(() => expect(insertContinuationCell).toHaveBeenCalledWith(
+            editor,
+            cell,
+            '// Exact snapshot\nLocalResult',
+            'exactSnapshot',
+        ));
+        expect(server.createResultSessionContinuation).toHaveBeenCalledWith({
+            sessionId: 'session-1',
+            tableId: 'table-1',
+            viewRevision: 2,
+            scope: 'selection',
+            rowRanges: [{ offset: 4, count: 2 }],
+            columnIndexes: [1, 0],
+        });
+        await vi.waitFor(() => expect(messaging.postedMessages[0]?.[0]).toMatchObject({
+            type: 'continuationResult',
+            kind: 'exactSnapshot',
+        }));
+    });
+
+    it('requires confirmation before embedding a large exact snapshot', async () => {
+        const server = new NullServer();
+        server.createResultSessionContinuation = vi.fn(async () => ({
+            snapshotQuery: '// Exact snapshot\nLocalResult',
+            snapshotTextBytes: 50_000,
+            queryTextBudgetBytes: 61_440,
+            projectedRows: 1_000,
+        }));
+        server.disposeResultSession = vi.fn(async () => ({ disposed: true }));
+        const insertContinuationCell = vi.fn(async () => undefined);
+        const warning = vi.spyOn(vscode.window, 'showWarningMessage')
+            .mockResolvedValue('Create snapshot cell' as never);
+        const manager = createManager(server, { insertContinuationCell });
+        const cell = createCell();
+        const notebook = createNotebook([cell]);
+        manager.prepareSession(notebook, cell, 'session-1');
+        await manager.adoptSession(notebook, cell, 'session-1');
+        const messaging = vscodeMock().__rendererMessagings[0]!;
+
+        messaging.emitter.fire({
+            editor: { notebook },
+            message: {
+                type: 'continue',
+                requestId: 'continue-1',
+                outputId: 'output-1',
+                sessionId: 'session-1',
+                tableId: 'table-1',
+                viewRevision: 0,
+                scope: 'filtered',
+                columnIndexes: [0],
+            },
+        });
+
+        await vi.waitFor(() => expect(insertContinuationCell).toHaveBeenCalledOnce());
+        expect(warning.mock.calls[0]?.[1]).toMatchObject({
+            modal: true,
+            detail: expect.stringContaining('service query logs'),
+        });
+    });
+
+    it('requires confirmation before creating a live rerun cell', async () => {
+        const server = new NullServer();
+        server.createResultSessionContinuation = vi.fn(async () => ({
+            snapshotTextBytes: 61_500,
+            queryTextBudgetBytes: 61_440,
+            projectedRows: 10_000,
+            liveRerunQuery: '// Live rerun\nStormEvents',
+            liveRerunTextBytes: 32,
+        }));
+        server.disposeResultSession = vi.fn(async () => ({ disposed: true }));
+        const insertContinuationCell = vi.fn(async () => undefined);
+        const warning = vi.spyOn(vscode.window, 'showWarningMessage')
+            .mockResolvedValue('Generate live rerun cell' as never);
+        const manager = createManager(server, { insertContinuationCell });
+        const cell = createCell();
+        const notebook = createNotebook([cell]);
+        manager.prepareSession(notebook, cell, 'session-1');
+        await manager.adoptSession(notebook, cell, 'session-1');
+        const messaging = vscodeMock().__rendererMessagings[0]!;
+        const editor = { notebook };
+
+        messaging.emitter.fire({
+            editor,
+            message: {
+                type: 'continue',
+                requestId: 'continue-1',
+                outputId: 'output-1',
+                sessionId: 'session-1',
+                tableId: 'table-1',
+                viewRevision: 1,
+                scope: 'filtered',
+                columnIndexes: [0],
+            },
+        });
+
+        await vi.waitFor(() => expect(warning).toHaveBeenCalledOnce());
+        await vi.waitFor(() => expect(insertContinuationCell).toHaveBeenCalledWith(
+            editor,
+            cell,
+            '// Live rerun\nStormEvents',
+            'liveRerun',
+        ));
+        expect(warning.mock.calls[0]?.[1]).toMatchObject({ modal: true });
+    });
+
+    it('does not create a live rerun cell when confirmation is declined', async () => {
+        const server = new NullServer();
+        server.createResultSessionContinuation = vi.fn(async () => ({
+            snapshotTextBytes: 61_500,
+            queryTextBudgetBytes: 61_440,
+            projectedRows: 10_000,
+            liveRerunQuery: '// Live rerun\nStormEvents',
+            liveRerunTextBytes: 32,
+        }));
+        server.disposeResultSession = vi.fn(async () => ({ disposed: true }));
+        const insertContinuationCell = vi.fn(async () => undefined);
+        vi.spyOn(vscode.window, 'showWarningMessage').mockResolvedValue(undefined);
+        const manager = createManager(server, { insertContinuationCell });
+        const cell = createCell();
+        const notebook = createNotebook([cell]);
+        manager.prepareSession(notebook, cell, 'session-1');
+        await manager.adoptSession(notebook, cell, 'session-1');
+        const messaging = vscodeMock().__rendererMessagings[0]!;
+
+        messaging.emitter.fire({
+            editor: { notebook },
+            message: {
+                type: 'continue',
+                requestId: 'continue-1',
+                outputId: 'output-1',
+                sessionId: 'session-1',
+                tableId: 'table-1',
+                viewRevision: 1,
+                scope: 'filtered',
+                columnIndexes: [0],
+            },
+        });
+
+        await vi.waitFor(() => expect(messaging.postedMessages[0]?.[0]).toMatchObject({
+            type: 'continuationCancelled',
+        }));
+        expect(insertContinuationCell).not.toHaveBeenCalled();
+    });
+
     it('disposes sessions when cells are removed and notebooks close', async () => {
         const server = new NullServer();
         server.disposeResultSession = vi.fn(async () => ({ disposed: true }));
@@ -358,12 +537,24 @@ describe('NotebookResultManager', () => {
     });
 });
 
-function createManager(server: NullServer): NotebookResultManager {
+function createManager(
+    server: NullServer,
+    notebookManager: {
+        insertContinuationCell: ReturnType<typeof vi.fn>;
+    } = {
+        insertContinuationCell: vi.fn(async () => undefined),
+    },
+): NotebookResultManager {
     const context = { subscriptions: [] } as unknown as vscode.ExtensionContext;
     const clipboard = {
         copyText: vi.fn(async () => undefined),
     } as unknown as IClipboard;
-    return new NotebookResultManager(context, server, clipboard);
+    return new NotebookResultManager(
+        context,
+        server,
+        clipboard,
+        notebookManager as unknown as KustoNotebookManager,
+    );
 }
 
 function createStatus(): ResultSessionStatus {
@@ -396,10 +587,11 @@ function createToken(): vscode.CancellationToken {
     } as vscode.CancellationToken;
 }
 
-function createNotebook(): vscode.NotebookDocument {
+function createNotebook(cells: vscode.NotebookCell[] = []): vscode.NotebookDocument {
     return {
         uri: vscode.Uri.parse('file:///investigation.kqlnb'),
         notebookType: 'msKustoExplorer.kqlNotebook',
+        getCells: () => cells,
     } as vscode.NotebookDocument;
 }
 

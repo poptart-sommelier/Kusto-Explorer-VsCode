@@ -60,12 +60,12 @@ public record RunResult
     public ExecuteResult? ExecuteResult { get; init; }
 
     /// <summary>
-    /// The final query options, if the query alterated the global query options.
+    /// The final query options used for execution.
     /// </summary>
     public ImmutableDictionary<string, string>? QueryOptions { get; init; }
 
     /// <summary>
-    /// The final query parameters, if the query altered the global query parameters.
+    /// The final query parameters used for execution.
     /// </summary>
     public ImmutableDictionary<string, string>? QueryParameters { get; init; }
 

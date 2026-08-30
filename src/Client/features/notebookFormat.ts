@@ -4,6 +4,14 @@
 export const KUSTO_NOTEBOOK_FORMAT_VERSION = 1 as const;
 export const KUSTO_NOTEBOOK_TYPE = 'msKustoExplorer.kqlNotebook';
 export const KUSTO_NOTEBOOK_CELL_ID_METADATA_KEY = 'msKustoExplorer.cellId';
+export const KUSTO_NOTEBOOK_CONTINUATION_METADATA_KEY = 'msKustoExplorer.continuation';
+
+export type KustoNotebookContinuationKind = 'exactSnapshot' | 'liveRerun';
+
+export interface KustoNotebookContinuationMetadata {
+    kind: KustoNotebookContinuationKind;
+    sourceCellId: string;
+}
 
 export type NotebookJsonValue =
     | boolean

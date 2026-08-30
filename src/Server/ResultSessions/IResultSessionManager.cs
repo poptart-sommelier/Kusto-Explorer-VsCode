@@ -25,6 +25,10 @@ public interface IResultSessionManager : IDisposable
         GetResultSessionProjectionParams parameters,
         CancellationToken cancellationToken);
 
+    Task<CreateResultSessionContinuationResult> CreateContinuationAsync(
+        CreateResultSessionContinuationParams parameters,
+        CancellationToken cancellationToken);
+
     Task<DisposeResultSessionResult> DisposeAsync(
         DisposeResultSessionParams parameters);
 }

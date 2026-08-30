@@ -22,12 +22,15 @@ public class ResultSessionContractsTests
         Assert.AreEqual(1, constants[nameof(ResultSessionProtocol.Version)]);
         Assert.AreEqual(1_000, constants[nameof(ResultSessionProtocol.MaxPageSize)]);
         Assert.AreEqual(1_000, constants[nameof(ResultSessionProtocol.MaxProjectionPageSize)]);
+        Assert.AreEqual(60 * 1_024, constants[nameof(ResultSessionProtocol.ScopedQueryTextBudgetBytes)]);
+        Assert.AreEqual(900 * 1_024, constants[nameof(ResultSessionProtocol.NativeAdxQueryTextBudgetBytes)]);
         Assert.AreEqual("kusto/startResultSession", constants[nameof(ResultSessionProtocol.StartMethod)]);
         Assert.AreEqual("kusto/cancelResultSessionOperation", constants[nameof(ResultSessionProtocol.CancelMethod)]);
         Assert.AreEqual("kusto/getResultSessionStatus", constants[nameof(ResultSessionProtocol.StatusMethod)]);
         Assert.AreEqual("kusto/setResultSessionView", constants[nameof(ResultSessionProtocol.SetViewMethod)]);
         Assert.AreEqual("kusto/getResultSessionPage", constants[nameof(ResultSessionProtocol.PageMethod)]);
         Assert.AreEqual("kusto/getResultSessionProjection", constants[nameof(ResultSessionProtocol.ProjectionMethod)]);
+        Assert.AreEqual("kusto/createResultSessionContinuation", constants[nameof(ResultSessionProtocol.ContinuationMethod)]);
         Assert.AreEqual("kusto/disposeResultSession", constants[nameof(ResultSessionProtocol.DisposeMethod)]);
     }
 

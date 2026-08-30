@@ -62,6 +62,11 @@ class ResultGrid {
         this.copyButton.disabled = true;
         this.copyButton.addEventListener('click', () => this.copySelection());
 
+        this.continueButton = document.createElement('button');
+        this.continueButton.type = 'button';
+        this.continueButton.textContent = 'Continue results';
+        this.continueButton.addEventListener('click', () => this.continueResults());
+
         this.clearFiltersButton = document.createElement('button');
         this.clearFiltersButton.type = 'button';
         this.clearFiltersButton.textContent = 'Clear filters';
@@ -79,6 +84,7 @@ class ResultGrid {
         this.status.setAttribute('aria-live', 'polite');
         this.toolbar.append(
             this.copyButton,
+            this.continueButton,
             this.clearFiltersButton,
             this.cancelViewButton,
             this.status,
@@ -130,6 +136,7 @@ class ResultGrid {
         this.scroller.setAttribute('aria-rowcount', String(this.state.totalRows + 1));
         this.scroller.setAttribute('aria-colcount', String(table.columns.length));
         this.copyButton.disabled = !this.state.selection;
+        this.updateContinueButton();
         this.updateFilterButton();
         this.cancelViewButton.disabled = !this.state.pendingView;
         this.scroller.scrollTop = 0;
@@ -155,7 +162,8 @@ class ResultGrid {
                 order: table.columns.map((_, index) => index),
                 widths: table.columns.map(column => defaultColumnWidth(column)),
                 pages: new Map(),
-                pendingPages: new Set(),
+                pendingPages: new Map(),
+                pageRequests: new Map(),
                 selection: undefined,
                 sort: undefined,
                 draftSort: undefined,
@@ -165,6 +173,7 @@ class ResultGrid {
                 pendingView: undefined,
                 queuedView: false,
                 automaticViewRetries: 0,
+                pendingContinuation: undefined,
                 filterTimer: undefined,
             };
             this.tableStates.set(table.id, state);
@@ -338,11 +347,13 @@ class ResultGrid {
         const lastPage = Math.floor(Math.max(first, last - 1) / PAGE_SIZE) * PAGE_SIZE;
         for (let offset = firstPage; offset <= lastPage; offset += PAGE_SIZE) {
             if (!this.state.pages.has(offset) && !this.state.pendingPages.has(offset)) {
-                this.state.pendingPages.add(offset);
-                this.post('page', {
+                const revision = this.state.revision;
+                const requestId = this.post('page', {
                     offset,
                     count: Math.min(PAGE_SIZE, this.state.totalRows - offset),
                 });
+                this.state.pendingPages.set(offset, requestId);
+                this.state.pageRequests.set(requestId, { offset, revision });
             }
         }
     }
@@ -359,7 +370,14 @@ class ResultGrid {
         }
         if (message.type === 'pageResult') {
             const page = message.page;
-            targetState.pendingPages.delete(page.offset);
+            const pageRequest = targetState.pageRequests.get(message.requestId);
+            if (!pageRequest) {
+                return;
+            }
+            targetState.pageRequests.delete(message.requestId);
+            if (targetState.pendingPages.get(page.offset) === message.requestId) {
+                targetState.pendingPages.delete(page.offset);
+            }
             if (page.viewRevision !== targetState.revision) {
                 return;
             }
@@ -421,10 +439,31 @@ class ResultGrid {
                 this.updateFilterButton();
                 this.cancelViewButton.disabled = true;
                 this.copyButton.disabled = !targetState.selection;
+                this.updateContinueButton();
                 this.updateFilterValidation();
                 this.renderRows();
             }
             this.sendQueuedView(targetState);
+        } else if (message.type === 'continuationResult') {
+            if (targetState.pendingContinuation !== message.requestId) {
+                return;
+            }
+            targetState.pendingContinuation = undefined;
+            if (targetState === this.state) {
+                this.updateContinueButton();
+                this.updateStatus(message.kind === 'exactSnapshot'
+                    ? 'Created an exact snapshot cell.'
+                    : 'Created a live rerun cell.');
+            }
+        } else if (message.type === 'continuationCancelled') {
+            if (targetState.pendingContinuation !== message.requestId) {
+                return;
+            }
+            targetState.pendingContinuation = undefined;
+            if (targetState === this.state) {
+                this.updateContinueButton();
+                this.updateStatus();
+            }
         } else if (message.type === 'copyResult' && targetState === this.state) {
             this.status.textContent = `Copied ${message.copiedRows.toLocaleString()} row${message.copiedRows === 1 ? '' : 's'}.`;
         } else if (message.type === 'viewCancelled') {
@@ -449,6 +488,7 @@ class ResultGrid {
                     this.updateFilterButton();
                     this.renderHeader();
                     this.copyButton.disabled = !targetState.selection;
+                    this.updateContinueButton();
                 }
                 this.updateStatus();
                 this.renderRows();
@@ -470,23 +510,40 @@ class ResultGrid {
             }
             if (targetState === this.state) {
                 this.cancelViewButton.disabled = true;
+                this.copyButton.disabled = !targetState.selection;
+                this.updateContinueButton();
                 this.status.textContent = canRetry
                     ? 'The view changed elsewhere. Retrying...'
                     : 'The view changed elsewhere. Edit a filter or sort to retry.';
             }
             this.sendQueuedView(targetState);
         } else if (message.type === 'requestError') {
-            targetState.pendingPages.clear();
+            const failedPage = targetState.pageRequests.get(message.requestId);
+            if (failedPage) {
+                targetState.pageRequests.delete(message.requestId);
+                if (targetState.pendingPages.get(failedPage.offset) === message.requestId) {
+                    targetState.pendingPages.delete(failedPage.offset);
+                }
+                if (failedPage.revision !== targetState.revision) {
+                    return;
+                }
+            }
             const failedPendingView = targetState.pendingView?.requestId === message.requestId;
+            const failedContinuation = targetState.pendingContinuation === message.requestId;
             if (failedPendingView) {
                 targetState.pendingView = undefined;
+            }
+            if (failedContinuation) {
+                targetState.pendingContinuation = undefined;
             }
             const table = message.status?.tables.find(candidate => candidate.id === targetState.table.id);
             const preserveDraft = targetState.queuedView
                 || failedPendingView
                 || targetState.pendingView !== undefined
                 || targetState.filterTimer !== undefined;
-            const synchronized = message.status
+            const readyRevisionChanged = table?.view?.readyRevision !== undefined
+                && table.view.readyRevision !== targetState.revision;
+            const synchronized = readyRevisionChanged
                 && this.synchronizeReadyView(targetState, table, preserveDraft);
             if (synchronized
                 && failedPendingView
@@ -499,6 +556,7 @@ class ResultGrid {
                 if (synchronized) {
                     this.updateCanvasSize();
                     this.updateFilterButton();
+                    this.updateContinueButton();
                     this.renderHeader();
                     this.updateStatus('The result view changed in another editor.');
                     this.renderRows();
@@ -506,6 +564,9 @@ class ResultGrid {
                     if (failedPendingView) {
                         this.renderHeader();
                         this.cancelViewButton.disabled = true;
+                    }
+                    if (failedContinuation) {
+                        this.updateContinueButton();
                     }
                     this.status.textContent = message.message;
                     this.status.classList.add('error');
@@ -599,10 +660,12 @@ class ResultGrid {
         this.updateStatus(status);
         if (state.pendingView) {
             state.queuedView = true;
+            this.updateContinueButton();
             return;
         }
         if (debounce) {
             state.filterTimer = setTimeout(() => this.sendViewChange(state), FILTER_DEBOUNCE_MS);
+            this.updateContinueButton();
         } else {
             this.sendViewChange(state);
         }
@@ -630,6 +693,7 @@ class ResultGrid {
         state.pendingView = { sort, filters, revision, requestId };
         if (state === this.state) {
             this.cancelViewButton.disabled = false;
+            this.updateContinueButton();
         }
     }
 
@@ -728,6 +792,7 @@ class ResultGrid {
             };
         }
         this.copyButton.disabled = false;
+        this.updateContinueButton();
         this.scroller.setAttribute('aria-activedescendant', `kusto-cell-${this.outputId}-${row}-${firstColumn}`);
         this.renderRows();
     }
@@ -780,6 +845,51 @@ class ResultGrid {
             }],
             columnIndexes,
         });
+    }
+
+    continueResults() {
+        if (this.state.pendingContinuation) {
+            return;
+        }
+        const selection = this.state.selection;
+        const scope = selection ? 'selection' : 'filtered';
+        const rowRanges = selection
+            ? [{
+                offset: selection.firstRow,
+                count: selection.lastRow - selection.firstRow + 1,
+            }]
+            : undefined;
+        const columnIndexes = selection
+            ? this.state.order.slice(selection.firstColumn, selection.lastColumn + 1)
+            : [...this.state.order];
+        const requestId = this.post('continue', {
+            scope,
+            ...(rowRanges ? { rowRanges } : {}),
+            columnIndexes,
+        });
+        this.state.pendingContinuation = requestId;
+        this.updateContinueButton();
+        this.updateStatus(selection
+            ? 'Creating snapshot from selection...'
+            : 'Creating snapshot from filtered results...');
+    }
+
+    updateContinueButton() {
+        const selection = this.state.selection;
+        this.continueButton.disabled = Boolean(
+            this.state.pendingContinuation
+            || this.state.pendingView
+            || this.state.queuedView
+            || this.state.filterTimer
+            || this.state.filterErrors.size > 0
+            || !filtersEqual(this.state.draftFilters, this.state.filters)
+            || !sortsEqual(this.state.draftSort, this.state.sort),
+        );
+        this.continueButton.textContent = selection
+            ? 'Continue selection'
+            : this.state.draftFilters.size > 0
+                ? 'Continue filtered results'
+                : 'Continue results';
     }
 
     post(type, body, state = this.state) {
@@ -848,6 +958,25 @@ function cloneFilters(filters) {
         columnIndex,
         { ...value },
     ]));
+}
+
+function filtersEqual(left, right) {
+    if (left.size !== right.size) {
+        return false;
+    }
+    for (const [columnIndex, filter] of left) {
+        const other = right.get(columnIndex);
+        if (filter.pattern !== other?.pattern
+            || filter.caseSensitive !== other?.caseSensitive) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function sortsEqual(left, right) {
+    return left?.columnIndex === right?.columnIndex
+        && left?.direction === right?.direction;
 }
 
 function filtersToMap(filters) {

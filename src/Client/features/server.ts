@@ -11,6 +11,8 @@ import {
     RESULT_SESSION_METHODS,
     type CancelResultSessionOperationParams,
     type CancelResultSessionOperationResult,
+    type CreateResultSessionContinuationParams,
+    type CreateResultSessionContinuationResult,
     type DisposeResultSessionParams,
     type DisposeResultSessionResult,
     type GetResultSessionPageParams,
@@ -60,6 +62,7 @@ export interface IServer {
     setResultSessionView(params: SetResultSessionViewParams, token?: CancellationToken): Promise<SetResultSessionViewResult>;
     getResultSessionPage(params: GetResultSessionPageParams): Promise<ResultSessionPage>;
     getResultSessionProjection(params: GetResultSessionProjectionParams): Promise<ResultSessionProjection>;
+    createResultSessionContinuation(params: CreateResultSessionContinuationParams): Promise<CreateResultSessionContinuationResult>;
     disposeResultSession(params: DisposeResultSessionParams): Promise<DisposeResultSessionResult>;
 
     // Notifications (client → server)
@@ -410,6 +413,13 @@ export class Server implements IServer {
         return this.client.sendRequest<ResultSessionProjection>(RESULT_SESSION_METHODS.projection, params);
     }
 
+    createResultSessionContinuation(params: CreateResultSessionContinuationParams): Promise<CreateResultSessionContinuationResult> {
+        return this.client.sendRequest<CreateResultSessionContinuationResult>(
+            RESULT_SESSION_METHODS.continuation,
+            params,
+        );
+    }
+
     disposeResultSession(params: DisposeResultSessionParams): Promise<DisposeResultSessionResult> {
         return this.client.sendRequest<DisposeResultSessionResult>(RESULT_SESSION_METHODS.dispose, params);
     }
@@ -493,6 +503,7 @@ export class NullServer implements IServer {
     setResultSessionView(): Promise<SetResultSessionViewResult> { return Promise.resolve({ accepted: false, revision: 0 }); }
     getResultSessionPage(): Promise<ResultSessionPage> { return Promise.reject(new Error('Kusto language server is unavailable.')); }
     getResultSessionProjection(): Promise<ResultSessionProjection> { return Promise.reject(new Error('Kusto language server is unavailable.')); }
+    createResultSessionContinuation(): Promise<CreateResultSessionContinuationResult> { return Promise.reject(new Error('Kusto language server is unavailable.')); }
     disposeResultSession(): Promise<DisposeResultSessionResult> { return Promise.resolve({ disposed: false }); }
     sendConnectionsUpdated(): void {}
     sendDocumentConnectionChanged(): void {}

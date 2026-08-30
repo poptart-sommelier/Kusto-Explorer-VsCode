@@ -4,7 +4,10 @@
 import * as vscode from 'vscode';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { KustoNotebookManager } from '../../features/kustoNotebookManager';
-import { KUSTO_NOTEBOOK_CELL_ID_METADATA_KEY } from '../../features/notebookFormat';
+import {
+    KUSTO_NOTEBOOK_CELL_ID_METADATA_KEY,
+    KUSTO_NOTEBOOK_CONTINUATION_METADATA_KEY,
+} from '../../features/notebookFormat';
 import type { ConnectionManager } from '../../features/connectionManager';
 
 describe('KustoNotebookManager', () => {
@@ -78,6 +81,93 @@ describe('KustoNotebookManager', () => {
         );
         manager.dispose();
     });
+
+    it('inserts a labeled continuation cell after its source', async () => {
+        const { manager } = createManager();
+        const source = createCell();
+        source.metadata = { [KUSTO_NOTEBOOK_CELL_ID_METADATA_KEY]: 'source-id' };
+        const notebook = createNotebook([source]);
+        const revealRange = vi.fn();
+        const editor = {
+            notebook,
+            selection: undefined,
+            revealRange,
+        } as unknown as vscode.NotebookEditor;
+        const applyEdit = vi.spyOn(vscode.workspace, 'applyEdit').mockResolvedValue(true);
+
+        await manager.insertContinuationCell(
+            editor,
+            source,
+            'let LocalResult = datatable (Value: long) [1];\nLocalResult',
+            'exactSnapshot',
+        );
+
+        const edit = applyEdit.mock.calls[0]?.[0] as unknown as {
+            entries: Array<{
+                edits: Array<{
+                    index: number;
+                    cells: vscode.NotebookCellData[];
+                }>;
+            }>;
+        };
+        expect(edit.entries[0]?.edits[0]?.index).toBe(1);
+        const inserted = edit.entries[0]?.edits[0]?.cells[0];
+        expect(inserted?.value).toContain('LocalResult');
+        expect(inserted?.metadata).toMatchObject({
+            [KUSTO_NOTEBOOK_CELL_ID_METADATA_KEY]: expect.any(String),
+            [KUSTO_NOTEBOOK_CONTINUATION_METADATA_KEY]: {
+                kind: 'exactSnapshot',
+                sourceCellId: 'source-id',
+            },
+        });
+        expect(editor.selection).toMatchObject({ start: 1, end: 2 });
+        expect(revealRange).toHaveBeenCalledOnce();
+        manager.dispose();
+    });
+
+    it('serializes continuation insertions and recomputes the source position', async () => {
+        const { manager } = createManager();
+        const first = createCell('first');
+        const second = createCell('second');
+        first.metadata = { [KUSTO_NOTEBOOK_CELL_ID_METADATA_KEY]: 'first-id' };
+        second.metadata = { [KUSTO_NOTEBOOK_CELL_ID_METADATA_KEY]: 'second-id' };
+        const cells = [first, second];
+        const notebook = createNotebook(cells);
+        const editor = {
+            notebook,
+            revealRange: vi.fn(),
+        } as unknown as vscode.NotebookEditor;
+        let completeFirstEdit: ((applied: boolean) => void) | undefined;
+        const applyEdit = vi.spyOn(vscode.workspace, 'applyEdit')
+            .mockImplementationOnce(() => new Promise(resolve => {
+                completeFirstEdit = resolve;
+            }))
+            .mockResolvedValue(true);
+
+        const firstInsertion = manager.insertContinuationCell(
+            editor,
+            first,
+            'LocalResult',
+            'exactSnapshot',
+        );
+        const secondInsertion = manager.insertContinuationCell(
+            editor,
+            second,
+            'LocalResult',
+            'exactSnapshot',
+        );
+        await vi.waitFor(() => expect(applyEdit).toHaveBeenCalledTimes(1));
+
+        cells.splice(1, 0, createCell('inserted'));
+        completeFirstEdit?.(true);
+        await Promise.all([firstInsertion, secondInsertion]);
+
+        const secondEdit = applyEdit.mock.calls[1]?.[0] as unknown as {
+            entries: Array<{ edits: Array<{ index: number }> }>;
+        };
+        expect(secondEdit.entries[0]?.edits[0]?.index).toBe(3);
+        manager.dispose();
+    });
 });
 
 function createManager(): {
@@ -103,13 +193,13 @@ function createManager(): {
     };
 }
 
-function createCell(): vscode.NotebookCell {
+function createCell(id: string = 'cell-1'): vscode.NotebookCell {
     return {
         index: 0,
         kind: vscode.NotebookCellKind.Code,
         metadata: {},
         document: {
-            uri: vscode.Uri.parse('vscode-notebook-cell:///investigation.kqlnb#cell-1'),
+            uri: vscode.Uri.parse(`vscode-notebook-cell:///investigation.kqlnb#${id}`),
         },
     } as unknown as vscode.NotebookCell;
 }

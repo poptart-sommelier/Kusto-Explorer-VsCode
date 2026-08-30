@@ -66,6 +66,10 @@ export const window = {
     }),
 };
 
+export const commands = {
+    executeCommand: async () => undefined,
+};
+
 export const Uri = {
     parse: (value: string) => ({ toString: () => value, fsPath: value, scheme: 'file' }),
     file: (path: string) => ({ toString: () => path, fsPath: path, scheme: 'file' }),
@@ -169,6 +173,10 @@ export class CancellationTokenSource {
 }
 
 export class NotebookEdit {
+    static insertCells(index: number, cells: NotebookCellData[]) {
+        return { index, cells };
+    }
+
     static updateCellMetadata(index: number, metadata: { [key: string]: unknown }) {
         return { index, metadata };
     }
@@ -176,6 +184,20 @@ export class NotebookEdit {
     static updateNotebookMetadata(metadata: { [key: string]: unknown }) {
         return { metadata };
     }
+}
+
+export class NotebookRange {
+    constructor(
+        public start: number,
+        public end: number,
+    ) {}
+}
+
+export enum NotebookEditorRevealType {
+    Default = 0,
+    InCenter = 1,
+    InCenterIfOutsideViewport = 2,
+    AtTop = 3,
 }
 
 export class WorkspaceEdit {

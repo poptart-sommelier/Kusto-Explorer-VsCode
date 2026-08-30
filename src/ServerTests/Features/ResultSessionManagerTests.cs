@@ -4,6 +4,9 @@
 using System.Collections.Immutable;
 using System.Data;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
+using System.Text;
+using Kusto.Data.Common;
 using Kusto.Language;
 using Kusto.Language.Editor;
 using Kusto.Vscode;
@@ -631,6 +634,704 @@ public class ResultSessionManagerTests
     }
 
     [TestMethod]
+    public async Task Continuation_ExactSnapshotPreservesTypesEscapingAndRequestedColumnOrder()
+    {
+        var table = new DataTable("Typed");
+        table.Columns.Add("plain", typeof(int));
+        table.Columns.Add("display name", typeof(string));
+        table.Columns.Add("enabled", typeof(bool));
+        table.Columns.Add("tiny", typeof(byte));
+        table.Columns.Add("payload", typeof(object));
+        table.Rows.Add(7, "O'Reilly\n東京", true, byte.MaxValue, """{"value":"safe"}""");
+        using var manager = CompletedManager(table);
+        var (sessionId, tableId) = await StartAndGetTableAsync(manager);
+
+        var result = await CreateContinuationAsync(
+            manager,
+            sessionId,
+            tableId,
+            0,
+            ResultSessionContractValues.ProjectionAll,
+            [4, 1, 3, 2],
+            null,
+            CancellationToken.None);
+
+        Assert.IsNotNull(result.SnapshotQuery);
+        StringAssert.StartsWith(result.SnapshotQuery, "// Exact snapshot");
+        StringAssert.Contains(
+            result.SnapshotQuery,
+            "let LocalResult = datatable (payload: dynamic, ['display name']: string, tiny: bool, enabled: bool)");
+        StringAssert.Contains(result.SnapshotQuery, """dynamic({"value":"safe"})""");
+        StringAssert.Contains(result.SnapshotQuery, "true, true");
+        StringAssert.EndsWith(result.SnapshotQuery, "];\nLocalResult");
+        Assert.AreEqual(
+            Encoding.UTF8.GetByteCount(result.SnapshotQuery),
+            result.SnapshotTextBytes);
+        Assert.AreEqual(1, result.ProjectedRows);
+        Assert.IsNull(result.LiveRerunQuery);
+    }
+
+    [TestMethod]
+    public async Task Continuation_UsesReadyFilteredSortedOrderAndMapsSelectionRanges()
+    {
+        var table = new DataTable("Ordered");
+        table.Columns.Add("Key", typeof(int));
+        table.Columns.Add("Label", typeof(string));
+        table.Rows.Add(2, "keep-a");
+        table.Rows.Add(1, "drop");
+        table.Rows.Add(3, "keep-b");
+        using var manager = CompletedManager(table);
+        var (sessionId, tableId) = await StartAndGetTableAsync(manager);
+        await manager.SetViewAsync(new SetResultSessionViewParams
+        {
+            SessionId = sessionId,
+            TableId = tableId,
+            Revision = 1,
+            Filters = [Filter(1, "^keep", caseSensitive: true)],
+            Sorts =
+            [
+                new ResultSessionColumnSort
+                {
+                    ColumnIndex = 0,
+                    Direction = ResultSessionContractValues.SortDescending
+                }
+            ]
+        }, CancellationToken.None);
+
+        var filtered = await CreateContinuationAsync(
+            manager,
+            sessionId,
+            tableId,
+            1,
+            ResultSessionContractValues.ProjectionFiltered,
+            [1, 0]);
+        Assert.IsNotNull(filtered.SnapshotQuery);
+        Assert.IsTrue(
+            filtered.SnapshotQuery.IndexOf("keep-b", StringComparison.Ordinal)
+                < filtered.SnapshotQuery.IndexOf("keep-a", StringComparison.Ordinal),
+            filtered.SnapshotQuery);
+
+        var selection = await CreateContinuationAsync(
+            manager,
+            sessionId,
+            tableId,
+            1,
+            ResultSessionContractValues.ProjectionSelection,
+            [1, 0],
+            [new ResultSessionRowRange { Offset = 1, Count = 1 }]);
+        Assert.IsNotNull(selection.SnapshotQuery);
+        StringAssert.Contains(selection.SnapshotQuery, "keep-a");
+        Assert.IsFalse(selection.SnapshotQuery.Contains("keep-b", StringComparison.Ordinal));
+        Assert.AreEqual(1, selection.ProjectedRows);
+    }
+
+    [TestMethod]
+    public async Task Continuation_EmptySnapshotIsValidTypedDatatableKql()
+    {
+        var table = new DataTable("Empty");
+        table.Columns.Add("Count", typeof(long));
+        using var manager = CompletedManager(table);
+        var (sessionId, tableId) = await StartAndGetTableAsync(manager);
+
+        var result = await CreateContinuationAsync(
+            manager,
+            sessionId,
+            tableId,
+            0,
+            ResultSessionContractValues.ProjectionAll,
+            [0]);
+
+        Assert.IsNotNull(result.SnapshotQuery);
+        StringAssert.Contains(result.SnapshotQuery, "datatable (Count: long) [\n\n];");
+        StringAssert.EndsWith(result.SnapshotQuery, "LocalResult");
+        Assert.AreEqual(0, result.ProjectedRows);
+        Assert.AreEqual(
+            ResultSessionProtocol.ScopedQueryTextBudgetBytes,
+            result.QueryTextBudgetBytes);
+    }
+
+    [TestMethod]
+    public async Task Continuation_UsesUtf8MonitorAndAdxBudgets()
+    {
+        var table = new DataTable("Unicode");
+        table.Columns.Add("Text", typeof(string));
+        table.Rows.Add(new string('é', 35_000));
+
+        using var monitorManager = CompletedManager(table.Copy());
+        var monitorStart = await StartAndGetTableAsync(
+            monitorManager,
+            NewStart(cluster: "https://ade.loganalytics.io/subscriptions/example"));
+        var monitor = await CreateContinuationAsync(
+            monitorManager,
+            monitorStart.SessionId,
+            monitorStart.TableId,
+            0,
+            ResultSessionContractValues.ProjectionAll,
+            [0]);
+        Assert.AreEqual(ResultSessionProtocol.ScopedQueryTextBudgetBytes, monitor.QueryTextBudgetBytes);
+        Assert.IsNull(monitor.SnapshotQuery);
+        Assert.IsGreaterThan(monitor.QueryTextBudgetBytes, monitor.SnapshotTextBytes);
+
+        using var adxManager = CompletedManager(table.Copy());
+        var adxStart = await StartAndGetTableAsync(
+            adxManager,
+            NewStart(cluster: "https://sample.westeurope.kusto.windows.net"));
+        var adx = await CreateContinuationAsync(
+            adxManager,
+            adxStart.SessionId,
+            adxStart.TableId,
+            0,
+            ResultSessionContractValues.ProjectionAll,
+            [0]);
+        Assert.AreEqual(ResultSessionProtocol.NativeAdxQueryTextBudgetBytes, adx.QueryTextBudgetBytes);
+        Assert.IsNotNull(adx.SnapshotQuery);
+        Assert.AreEqual(Encoding.UTF8.GetByteCount(adx.SnapshotQuery), adx.SnapshotTextBytes);
+        Assert.IsGreaterThan(ResultSessionProtocol.ScopedQueryTextBudgetBytes, adx.SnapshotTextBytes);
+    }
+
+    [TestMethod]
+    public async Task Continuation_OversizedSelectionDoesNotOfferLiveRerun()
+    {
+        var table = new DataTable("Large");
+        table.Columns.Add("Text", typeof(string));
+        table.Rows.Add(new string('x', 70_000));
+        using var manager = CompletedManager(table);
+        var (sessionId, tableId) = await StartAndGetTableAsync(manager);
+
+        var result = await CreateContinuationAsync(
+            manager,
+            sessionId,
+            tableId,
+            0,
+            ResultSessionContractValues.ProjectionSelection,
+            [0],
+            [new ResultSessionRowRange { Offset = 0, Count = 1 }]);
+
+        Assert.IsNull(result.SnapshotQuery);
+        Assert.IsNull(result.LiveRerunQuery);
+        StringAssert.Contains(result.LiveRerunUnavailableReason, "arbitrary row selection");
+    }
+
+    [TestMethod]
+    public async Task Continuation_OversizedFilteredSnapshotOffersSupportedLiveRerun()
+    {
+        var table = new DataTable("Large");
+        table.Columns.Add("Message", typeof(string));
+        table.Columns.Add("Code", typeof(int));
+        for (var index = 0; index < 1_000; index++)
+            table.Rows.Add($"keep-{index:D4}-{new string('x', 80)}", index);
+        using var manager = CompletedManager(table);
+        var (sessionId, tableId) = await StartAndGetTableAsync(
+            manager,
+            NewStart("LargeSource | take 1000 ;;; \r\n"));
+        await manager.SetViewAsync(new SetResultSessionViewParams
+        {
+            SessionId = sessionId,
+            TableId = tableId,
+            Revision = 1,
+            Filters = [Filter(0, "^keep\\-[0-9]+", caseSensitive: true)],
+            Sorts =
+            [
+                new ResultSessionColumnSort
+                {
+                    ColumnIndex = 1,
+                    Direction = ResultSessionContractValues.SortDescending
+                }
+            ]
+        }, CancellationToken.None);
+
+        var result = await CreateContinuationAsync(
+            manager,
+            sessionId,
+            tableId,
+            1,
+            ResultSessionContractValues.ProjectionFiltered,
+            [1, 0]);
+
+        Assert.IsNull(result.SnapshotQuery);
+        Assert.IsNotNull(result.LiveRerunQuery);
+        StringAssert.StartsWith(result.LiveRerunQuery, "#connect cluster(");
+        StringAssert.Contains(result.LiveRerunQuery, "// LIVE RERUN:");
+        StringAssert.Contains(
+            result.LiveRerunQuery,
+            "LargeSource | take 1000\n| where tostring(Message) matches regex '^keep\\\\-[0-9]+'");
+        StringAssert.Contains(result.LiveRerunQuery, "\n| order by Code desc\n| project");
+        StringAssert.EndsWith(result.LiveRerunQuery, "| project Code, Message");
+        Assert.IsNull(result.LiveRerunUnavailableReason);
+        Assert.AreEqual(
+            Encoding.UTF8.GetByteCount(result.LiveRerunQuery),
+            result.LiveRerunTextBytes);
+    }
+
+    [TestMethod]
+    public async Task Continuation_AllScopeDoesNotReplayReadyFiltersOrSorts()
+    {
+        var table = new DataTable("Large");
+        table.Columns.Add("Message", typeof(string));
+        table.Columns.Add("Code", typeof(int));
+        for (var index = 0; index < 1_000; index++)
+            table.Rows.Add($"keep-{index:D4}-{new string('x', 80)}", index);
+        using var manager = CompletedManager(table);
+        var (sessionId, tableId) = await StartAndGetTableAsync(
+            manager,
+            NewStart("LargeSource | take 1000"));
+        await manager.SetViewAsync(new SetResultSessionViewParams
+        {
+            SessionId = sessionId,
+            TableId = tableId,
+            Revision = 1,
+            Filters = [Filter(0, "^keep-0", caseSensitive: true)],
+            Sorts =
+            [
+                new ResultSessionColumnSort
+                {
+                    ColumnIndex = 1,
+                    Direction = ResultSessionContractValues.SortDescending
+                }
+            ]
+        }, CancellationToken.None);
+
+        var result = await CreateContinuationAsync(
+            manager,
+            sessionId,
+            tableId,
+            1,
+            ResultSessionContractValues.ProjectionAll,
+            [0]);
+
+        Assert.IsNull(result.SnapshotQuery);
+        Assert.IsNotNull(result.LiveRerunQuery);
+        Assert.IsFalse(result.LiveRerunQuery.Contains("| where", StringComparison.Ordinal));
+        Assert.IsFalse(result.LiveRerunQuery.Contains("| order by", StringComparison.Ordinal));
+        StringAssert.EndsWith(result.LiveRerunQuery, "| project Message");
+    }
+
+    [TestMethod]
+    public async Task Continuation_UnsupportedRegexNamesColumnAndPreventsLiveRerun()
+    {
+        var table = new DataTable("Large");
+        table.Columns.Add("Message", typeof(string));
+        for (var index = 0; index < 1_000; index++)
+            table.Rows.Add($"keep-{new string('x', 80)}");
+        using var manager = CompletedManager(table);
+        var (sessionId, tableId) = await StartAndGetTableAsync(manager);
+        await manager.SetViewAsync(new SetResultSessionViewParams
+        {
+            SessionId = sessionId,
+            TableId = tableId,
+            Revision = 1,
+            Filters = [Filter(0, "^(?=keep)", caseSensitive: true)],
+            Sorts = []
+        }, CancellationToken.None);
+
+        var result = await CreateContinuationAsync(
+            manager,
+            sessionId,
+            tableId,
+            1,
+            ResultSessionContractValues.ProjectionFiltered,
+            [0]);
+
+        Assert.IsNull(result.SnapshotQuery);
+        Assert.IsNull(result.LiveRerunQuery);
+        StringAssert.Contains(result.LiveRerunUnavailableReason, "column 'Message'");
+        StringAssert.Contains(result.LiveRerunUnavailableReason, "beginning with '(?'");
+    }
+
+    [TestMethod]
+    public async Task Continuation_DollarRegexAnchorCannotBeReplayed()
+    {
+        var table = LargeTextTable();
+        using var manager = CompletedManager(table);
+        var (sessionId, tableId) = await StartAndGetTableAsync(manager);
+        await manager.SetViewAsync(new SetResultSessionViewParams
+        {
+            SessionId = sessionId,
+            TableId = tableId,
+            Revision = 1,
+            Filters = [Filter(0, "x*$", caseSensitive: true)],
+            Sorts = []
+        }, CancellationToken.None);
+
+        var result = await CreateContinuationAsync(
+            manager,
+            sessionId,
+            tableId,
+            1,
+            ResultSessionContractValues.ProjectionFiltered,
+            [0]);
+
+        Assert.IsNull(result.LiveRerunQuery);
+        StringAssert.Contains(result.LiveRerunUnavailableReason, "'$' anchor");
+        StringAssert.Contains(result.LiveRerunUnavailableReason, "column 'Text'");
+    }
+
+    [TestMethod]
+    public async Task Continuation_RegexReplayRejectsLetterEscapesAndCountedRepetitions()
+    {
+        var cases = new[]
+        {
+            (Pattern: "^row-\\w+", Reason: "letter escape '\\w'"),
+            (Pattern: "^row-[0-9]{4}", Reason: "counted-repetition")
+        };
+        foreach (var testCase in cases)
+        {
+            using var manager = CompletedManager(LargeTextTable());
+            var (sessionId, tableId) = await StartAndGetTableAsync(manager);
+            await manager.SetViewAsync(new SetResultSessionViewParams
+            {
+                SessionId = sessionId,
+                TableId = tableId,
+                Revision = 1,
+                Filters = [Filter(0, testCase.Pattern, caseSensitive: true)],
+                Sorts = []
+            }, CancellationToken.None);
+
+            var result = await CreateContinuationAsync(
+                manager,
+                sessionId,
+                tableId,
+                1,
+                ResultSessionContractValues.ProjectionFiltered,
+                [0]);
+
+            Assert.IsNull(result.LiveRerunQuery);
+            StringAssert.Contains(result.LiveRerunUnavailableReason, testCase.Reason);
+            StringAssert.Contains(result.LiveRerunUnavailableReason, "column 'Text'");
+        }
+    }
+
+    [TestMethod]
+    public async Task Continuation_RegexReplayRejectsCaseInsensitiveFilter()
+    {
+        using var manager = CompletedManager(LargeTextTable());
+        var (sessionId, tableId) = await StartAndGetTableAsync(manager);
+        await manager.SetViewAsync(new SetResultSessionViewParams
+        {
+            SessionId = sessionId,
+            TableId = tableId,
+            Revision = 1,
+            Filters = [Filter(0, "^ROW-", caseSensitive: false)],
+            Sorts = []
+        }, CancellationToken.None);
+
+        var result = await CreateContinuationAsync(
+            manager,
+            sessionId,
+            tableId,
+            1,
+            ResultSessionContractValues.ProjectionFiltered,
+            [0]);
+
+        Assert.IsNull(result.LiveRerunQuery);
+        StringAssert.Contains(result.LiveRerunUnavailableReason, "case-insensitive");
+        StringAssert.Contains(result.LiveRerunUnavailableReason, "column 'Text'");
+    }
+
+    [TestMethod]
+    public async Task Continuation_LiveRerunBindsEffectiveAdxAndScopedConnections()
+    {
+        var cases = new[]
+        {
+            (
+                Cluster: "https://sample.westeurope.kusto.windows.net",
+                Database: "db'quoted",
+                TextLength: ResultSessionProtocol.NativeAdxQueryTextBudgetBytes + 1_024),
+            (
+                Cluster: "https://ade.loganalytics.io/subscriptions/o'reilly/resource",
+                Database: "workspace'quoted",
+                TextLength: ResultSessionProtocol.ScopedQueryTextBudgetBytes + 1_024)
+        };
+        foreach (var testCase in cases)
+        {
+            var table = new DataTable("Large");
+            table.Columns.Add("Text", typeof(string));
+            table.Rows.Add(new string('x', testCase.TextLength));
+            using var manager = CompletedManager(table);
+            var (sessionId, tableId) = await StartAndGetTableAsync(
+                manager,
+                NewStart(
+                    "LargeSource",
+                    cluster: testCase.Cluster,
+                    database: testCase.Database));
+
+            var result = await CreateContinuationAsync(
+                manager,
+                sessionId,
+                tableId,
+                0,
+                ResultSessionContractValues.ProjectionAll,
+                [0]);
+
+            Assert.IsNotNull(result.LiveRerunQuery);
+            var directiveText = result.LiveRerunQuery.Split('\n')[0].TrimEnd('\r');
+            StringAssert.Contains(
+                directiveText,
+                KustoGenerator.GetStringLiteral(testCase.Cluster));
+            Assert.IsTrue(ClientDirective.TryParse(directiveText, out var directive));
+            Assert.IsTrue(directive.TryGetConnectionInfo(
+                out var connection,
+                out var cluster,
+                out var database));
+            Assert.IsNull(connection);
+            var expectedCluster = testCase.Cluster.Contains(
+                "ade.loganalytics.io",
+                StringComparison.OrdinalIgnoreCase)
+                ? testCase.Cluster
+                : new Uri(testCase.Cluster).Host;
+            Assert.AreEqual(expectedCluster, cluster);
+            Assert.AreEqual(testCase.Database, database);
+            Assert.IsFalse(result.LiveRerunQuery.Contains("Data Source=", StringComparison.Ordinal));
+        }
+    }
+
+    [TestMethod]
+    public async Task Continuation_TerminalSemicolonBeforeTrailingCommentCannotBeReplayed()
+    {
+        foreach (var query in new[]
+        {
+            "LargeSource; // trailing comment",
+            "LargeSource; /* trailing block comment */",
+            "LargeSource; // first comment\n// second comment",
+            "LargeSource; /* first comment */\n// second comment",
+            "LargeSource; // first comment\n/* second comment */"
+        })
+        {
+            using var manager = CompletedManager(LargeTextTable());
+            var (sessionId, tableId) = await StartAndGetTableAsync(
+                manager,
+                NewStart(query));
+
+            var result = await CreateContinuationAsync(
+                manager,
+                sessionId,
+                tableId,
+                0,
+                ResultSessionContractValues.ProjectionAll,
+                [0]);
+
+            Assert.IsNull(result.LiveRerunQuery);
+            StringAssert.Contains(
+                result.LiveRerunUnavailableReason,
+                "trailing comment trivia after a terminal semicolon");
+        }
+    }
+
+    [TestMethod]
+    public async Task Continuation_NonStringFilterCannotBeReplayed()
+    {
+        var table = new DataTable("Large");
+        table.Columns.Add("Number", typeof(int));
+        table.Columns.Add("Payload", typeof(string));
+        for (var index = 0; index < 1_000; index++)
+            table.Rows.Add(index, new string('x', 80));
+        using var manager = CompletedManager(table);
+        var (sessionId, tableId) = await StartAndGetTableAsync(manager);
+        await manager.SetViewAsync(new SetResultSessionViewParams
+        {
+            SessionId = sessionId,
+            TableId = tableId,
+            Revision = 1,
+            Filters = [Filter(0, "^\\d+", caseSensitive: true)],
+            Sorts = []
+        }, CancellationToken.None);
+
+        var result = await CreateContinuationAsync(
+            manager,
+            sessionId,
+            tableId,
+            1,
+            ResultSessionContractValues.ProjectionFiltered,
+            [1]);
+
+        Assert.IsNull(result.LiveRerunQuery);
+        StringAssert.Contains(result.LiveRerunUnavailableReason, "column 'Number'");
+        StringAssert.Contains(result.LiveRerunUnavailableReason, "type 'int'");
+        StringAssert.Contains(result.LiveRerunUnavailableReason, "only string-column");
+    }
+
+    [TestMethod]
+    public async Task Continuation_StringSortCannotClaimExactLiveReplay()
+    {
+        var table = LargeTextTable();
+        using var manager = CompletedManager(table);
+        var (sessionId, tableId) = await StartAndGetTableAsync(manager);
+        await manager.SetViewAsync(new SetResultSessionViewParams
+        {
+            SessionId = sessionId,
+            TableId = tableId,
+            Revision = 1,
+            Filters = [],
+            Sorts =
+            [
+                new ResultSessionColumnSort
+                {
+                    ColumnIndex = 0,
+                    Direction = ResultSessionContractValues.SortAscending
+                }
+            ]
+        }, CancellationToken.None);
+
+        var result = await CreateContinuationAsync(
+            manager,
+            sessionId,
+            tableId,
+            1,
+            ResultSessionContractValues.ProjectionFiltered,
+            [0]);
+
+        Assert.IsNull(result.LiveRerunQuery);
+        StringAssert.Contains(result.LiveRerunUnavailableReason, "column 'Text'");
+        StringAssert.Contains(result.LiveRerunUnavailableReason, "local ordering");
+    }
+
+    [TestMethod]
+    public async Task Continuation_DirectiveExecutionContextMustMatchSessionBaseline()
+    {
+        var readOnlyOptions = ImmutableDictionary<string, string>.Empty.Add(
+            ClientRequestProperties.OptionRequestReadOnly,
+            "true");
+        using var baselineManager = new ResultSessionManager(new StubQueryManager((_, _) =>
+            Task.FromResult(Success(new EditString("LargeSource"), LargeTextTable()) with
+            {
+                QueryOptions = readOnlyOptions,
+                QueryParameters = ImmutableDictionary<string, string>.Empty
+            })));
+        var baselineSession = await StartAndGetTableAsync(
+            baselineManager,
+            NewStart("LargeSource", isReadOnly: true));
+        var baselineResult = await CreateContinuationAsync(
+            baselineManager,
+            baselineSession.SessionId,
+            baselineSession.TableId,
+            0,
+            ResultSessionContractValues.ProjectionAll,
+            [0]);
+        Assert.IsNotNull(baselineResult.LiveRerunQuery);
+
+        using var parameterManager = new ResultSessionManager(new StubQueryManager((_, _) =>
+            Task.FromResult(Success(new EditString("LargeSource"), LargeTextTable()) with
+            {
+                QueryOptions = readOnlyOptions,
+                QueryParameters = ImmutableDictionary<string, string>.Empty.Add(
+                    "threshold",
+                    "long(1)")
+            })));
+        var parameterSession = await StartAndGetTableAsync(
+            parameterManager,
+            NewStart("#qp threshold=long(1)\nLargeSource", isReadOnly: true));
+        var parameterResult = await CreateContinuationAsync(
+            parameterManager,
+            parameterSession.SessionId,
+            parameterSession.TableId,
+            0,
+            ResultSessionContractValues.ProjectionAll,
+            [0]);
+        Assert.IsNull(parameterResult.LiveRerunQuery);
+        StringAssert.Contains(parameterResult.LiveRerunUnavailableReason, "query parameters");
+
+        using var optionManager = new ResultSessionManager(new StubQueryManager((_, _) =>
+            Task.FromResult(Success(new EditString("LargeSource"), LargeTextTable()) with
+            {
+                QueryOptions = readOnlyOptions.Add("notruncation", "true"),
+                QueryParameters = ImmutableDictionary<string, string>.Empty
+            })));
+        var optionSession = await StartAndGetTableAsync(
+            optionManager,
+            NewStart("#crp notruncation=true\nLargeSource", isReadOnly: true));
+        var optionResult = await CreateContinuationAsync(
+            optionManager,
+            optionSession.SessionId,
+            optionSession.TableId,
+            0,
+            ResultSessionContractValues.ProjectionAll,
+            [0]);
+        Assert.IsNull(optionResult.LiveRerunQuery);
+        StringAssert.Contains(optionResult.LiveRerunUnavailableReason, "altered query options");
+    }
+
+    [TestMethod]
+    public async Task QueryManager_RetainsDirectiveAlteredExecutionContext()
+    {
+        var connection = new CapturingConnection();
+        var queryManager = new QueryManager(
+            new SingleConnectionManager(connection),
+            null!,
+            null!,
+            null!);
+        var baselineOptions = ImmutableDictionary<string, string>.Empty.Add(
+            ClientRequestProperties.OptionRequestReadOnly,
+            "true");
+
+        var result = await queryManager.RunQueryAsync(
+            new EditString(
+                "#qp threshold=long(1)\n#crp notruncation=true\nLargeSource"),
+            "cluster",
+            "database",
+            baselineOptions,
+            ImmutableDictionary<string, string>.Empty,
+            clientRequestId: null,
+            hardMaxRows: null,
+            CancellationToken.None);
+
+        Assert.AreEqual("LargeSource", result.Query.ToString());
+        Assert.AreEqual("long(1)", result.QueryParameters?["threshold"]);
+        Assert.AreEqual("true", result.QueryOptions?["notruncation"]);
+        Assert.AreEqual(
+            "true",
+            result.QueryOptions?[ClientRequestProperties.OptionRequestReadOnly]);
+        Assert.AreSame(connection.Options, result.QueryOptions);
+        Assert.AreSame(connection.Parameters, result.QueryParameters);
+    }
+
+    [TestMethod]
+    public async Task Continuation_MultipleTablesMakeOversizedLiveRerunAmbiguous()
+    {
+        var large = new DataTable("Large");
+        large.Columns.Add("Text", typeof(string));
+        large.Rows.Add(new string('x', 70_000));
+        using var manager = CompletedManager(large, IntTable(1));
+        var (sessionId, tableId) = await StartAndGetTableAsync(manager);
+
+        var result = await CreateContinuationAsync(
+            manager,
+            sessionId,
+            tableId,
+            0,
+            ResultSessionContractValues.ProjectionAll,
+            [0]);
+
+        Assert.IsNull(result.LiveRerunQuery);
+        StringAssert.Contains(result.LiveRerunUnavailableReason, "multiple result tables");
+    }
+
+    [TestMethod]
+    public async Task Continuation_RejectsStaleRevisionAndHonorsCancellation()
+    {
+        using var manager = CompletedManager(IntTable(2));
+        var (sessionId, tableId) = await StartAndGetTableAsync(manager);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => CreateContinuationAsync(
+            manager,
+            sessionId,
+            tableId,
+            1,
+            ResultSessionContractValues.ProjectionAll,
+            [0]));
+
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAsync<OperationCanceledException>(() => CreateContinuationAsync(
+            manager,
+            sessionId,
+            tableId,
+            0,
+            ResultSessionContractValues.ProjectionAll,
+            [0],
+            cancellationToken: cancellation.Token));
+    }
+
+    [TestMethod]
     public async Task ConcurrentStarts_DoNotExceedTheSessionLimit()
     {
         var queryGate = new TaskCompletionSource<RunResult>(
@@ -664,22 +1365,28 @@ public class ResultSessionManagerTests
     }
 
     private static async Task<(string SessionId, string TableId)> StartAndGetTableAsync(
-        ResultSessionManager manager)
+        ResultSessionManager manager,
+        StartResultSessionParams? parameters = null)
     {
-        var started = await manager.StartAsync(NewStart());
+        var started = await manager.StartAsync(parameters ?? NewStart());
         var status = await WaitForTerminalAsync(manager, started.SessionId);
         Assert.AreEqual(ResultSessionContractValues.StateCompleted, status.State);
         return (started.SessionId, status.Tables[0].Id);
     }
 
-    private static StartResultSessionParams NewStart()
+    private static StartResultSessionParams NewStart(
+        string query = "print Value=1",
+        string? cluster = "cluster",
+        string? database = "database",
+        bool? isReadOnly = null)
     {
         return new StartResultSessionParams
         {
             ProtocolVersion = ResultSessionProtocol.Version,
-            Query = "print Value=1",
-            Cluster = "cluster",
-            Database = "database",
+            Query = query,
+            Cluster = cluster,
+            Database = database,
+            IsReadOnly = isReadOnly,
             ClientRequestId = "request"
         };
     }
@@ -718,6 +1425,15 @@ public class ResultSessionManagerTests
         return table;
     }
 
+    private static DataTable LargeTextTable()
+    {
+        var table = new DataTable("Large");
+        table.Columns.Add("Text", typeof(string));
+        for (var index = 0; index < 1_000; index++)
+            table.Rows.Add($"row-{index:D4}-{new string('x', 80)}");
+        return table;
+    }
+
     private static Task<ResultSessionPage> GetPageAsync(
         ResultSessionManager manager,
         string sessionId,
@@ -734,6 +1450,27 @@ public class ResultSessionManagerTests
             Offset = offset,
             Count = count
         }, CancellationToken.None);
+    }
+
+    private static Task<CreateResultSessionContinuationResult> CreateContinuationAsync(
+        ResultSessionManager manager,
+        string sessionId,
+        string tableId,
+        long revision,
+        string scope,
+        ImmutableList<int> columnIndexes,
+        ImmutableList<ResultSessionRowRange>? rowRanges = null,
+        CancellationToken cancellationToken = default)
+    {
+        return manager.CreateContinuationAsync(new CreateResultSessionContinuationParams
+        {
+            SessionId = sessionId,
+            TableId = tableId,
+            ViewRevision = revision,
+            Scope = scope,
+            RowRanges = rowRanges,
+            ColumnIndexes = columnIndexes
+        }, cancellationToken);
     }
 
     private static async Task<ResultSessionStatus> WaitForTerminalAsync(
@@ -789,5 +1526,54 @@ public class ResultSessionManagerTests
         {
             return run(query, cancellationToken);
         }
+    }
+
+    private sealed class SingleConnectionManager(IConnection connection) : IConnectionManager
+    {
+        public IConnection GetOrAddConnection(string connectionStrings) => connection;
+
+        public bool TryGetConnection(
+            string clusterName,
+            [NotNullWhen(true)] out IConnection? result)
+        {
+            result = connection;
+            return true;
+        }
+    }
+
+    private sealed class CapturingConnection : IConnection
+    {
+        public string Cluster => "cluster";
+        public string? Database => "database";
+        public ImmutableDictionary<string, string>? Options { get; private set; }
+        public ImmutableDictionary<string, string>? Parameters { get; private set; }
+
+        public IConnection WithCluster(string clusterName) => this;
+
+        public IConnection WithDatabase(string databaseName) => this;
+
+        public Task<ExecuteResult> ExecuteAsync(
+            EditString query,
+            ImmutableDictionary<string, string>? options = null,
+            ImmutableDictionary<string, string>? parameters = null,
+            string? clientRequestId = null,
+            CancellationToken cancellationToken = default)
+        {
+            Options = options;
+            Parameters = parameters;
+            return Task.FromResult(new ExecuteResult());
+        }
+
+        public Task<ExecuteResult<T>> ExecuteAsync<T>(
+            EditString query,
+            ImmutableDictionary<string, string>? options = null,
+            ImmutableDictionary<string, string>? parameters = null,
+            CancellationToken cancellationToken = default)
+        {
+            throw new NotSupportedException();
+        }
+
+        public Task<string> GetServerKindAsync(CancellationToken cancellationToken) =>
+            Task.FromResult("Engine");
     }
 }
