@@ -8,6 +8,11 @@ const OVERSCAN_ROWS = 8;
 const MAX_CACHED_PAGES = 10;
 const FILTER_DEBOUNCE_MS = 300;
 const MAX_AUTOMATIC_VIEW_RETRIES = 1;
+const MIN_COLUMN_WIDTH = 70;
+const MAX_COLUMN_WIDTH = 1_000_000;
+const AUTO_FIT_MIN_WIDTH = 110;
+const AUTO_FIT_VALUE_PADDING = 20;
+const AUTO_FIT_HEADER_PADDING = 42;
 const instances = new Map();
 
 export function activate(context) {
@@ -64,7 +69,7 @@ class ResultGrid {
 
         this.continueButton = document.createElement('button');
         this.continueButton.type = 'button';
-        this.continueButton.textContent = 'Continue results';
+        this.continueButton.textContent = continuationActionLabel(false, false);
         this.continueButton.addEventListener('click', () => this.continueResults());
 
         this.clearFiltersButton = document.createElement('button');
@@ -198,6 +203,7 @@ class ResultGrid {
             const header = document.createElement('div');
             header.className = 'kusto-grid-header-cell';
             header.style.width = `${this.state.widths[columnIndex]}px`;
+            header.dataset.columnIndex = String(columnIndex);
             header.setAttribute('role', 'columnheader');
             const displayedSort = this.state.draftSort;
             header.setAttribute('aria-sort', sortAria(displayedSort, columnIndex));
@@ -259,10 +265,38 @@ class ResultGrid {
 
             const resize = document.createElement('span');
             resize.className = 'kusto-grid-resize';
+            resize.title = 'Drag or use arrow keys to resize. Double-click or press Enter to fit loaded values.';
+            resize.tabIndex = 0;
+            resize.setAttribute('role', 'separator');
+            resize.setAttribute('aria-orientation', 'vertical');
+            resize.setAttribute('aria-label', `Resize ${column.name}`);
+            resize.setAttribute('aria-valuemin', String(MIN_COLUMN_WIDTH));
+            resize.setAttribute('aria-valuemax', String(MAX_COLUMN_WIDTH));
+            resize.setAttribute('aria-valuenow', String(this.state.widths[columnIndex]));
             resize.addEventListener('pointerdown', event => {
                 event.preventDefault();
                 event.stopPropagation();
                 this.beginResize(event, columnIndex);
+            });
+            resize.addEventListener('dblclick', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                this.autoFitColumn(columnIndex);
+            });
+            resize.addEventListener('keydown', event => {
+                if (event.key === 'Enter') {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    this.autoFitColumn(columnIndex);
+                } else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const direction = event.key === 'ArrowLeft' ? -1 : 1;
+                    this.setColumnWidth(
+                        columnIndex,
+                        this.state.widths[columnIndex] + direction * (event.shiftKey ? 50 : 10),
+                    );
+                }
             });
             header.append(label, filter, resize);
             label.addEventListener('click', () => this.toggleSort(columnIndex));
@@ -318,6 +352,7 @@ class ResultGrid {
                 cell.className = 'kusto-grid-cell';
                 cell.id = `kusto-cell-${this.outputId}-${viewIndex}-${displayIndex}`;
                 cell.style.width = `${this.state.widths[columnIndex]}px`;
+                cell.dataset.columnIndex = String(columnIndex);
                 cell.setAttribute('role', 'gridcell');
                 cell.setAttribute('aria-colindex', String(displayIndex + 1));
                 if (this.isSelected(viewIndex, displayIndex)) {
@@ -745,10 +780,7 @@ class ResultGrid {
         const startX = event.clientX;
         const startWidth = this.state.widths[columnIndex];
         const onMove = move => {
-            this.state.widths[columnIndex] = Math.max(70, Math.min(600, startWidth + move.clientX - startX));
-            this.renderHeader();
-            this.updateCanvasSize();
-            this.renderRows();
+            this.setColumnWidth(columnIndex, startWidth + move.clientX - startX);
         };
         const onUp = () => {
             document.removeEventListener('pointermove', onMove);
@@ -756,6 +788,46 @@ class ResultGrid {
         };
         document.addEventListener('pointermove', onMove);
         document.addEventListener('pointerup', onUp);
+    }
+
+    setColumnWidth(columnIndex, width) {
+        this.state.widths[columnIndex] = clampColumnWidth(width);
+        const widthText = `${this.state.widths[columnIndex]}px`;
+        const totalWidthText = `${this.totalWidth()}px`;
+        const selector = `[data-column-index="${columnIndex}"]`;
+        const header = this.headerRow.querySelector(selector);
+        if (header) {
+            header.style.width = widthText;
+            header.querySelector('.kusto-grid-resize')
+                ?.setAttribute('aria-valuenow', String(this.state.widths[columnIndex]));
+        }
+        for (const cell of this.canvas.querySelectorAll(`.kusto-grid-cell${selector}`)) {
+            cell.style.width = widthText;
+        }
+        this.headerRow.style.width = totalWidthText;
+        this.canvas.style.width = totalWidthText;
+        for (const row of this.canvas.querySelectorAll('.kusto-grid-row')) {
+            row.style.width = totalWidthText;
+        }
+    }
+
+    autoFitColumn(columnIndex) {
+        const column = this.state.table.columns[columnIndex];
+        if (!column) {
+            return;
+        }
+        const header = this.headerRow.querySelector(`[data-column-index="${columnIndex}"]`);
+        const title = header?.querySelector('.kusto-grid-header-title');
+        const visibleCell = this.canvas.querySelector(`.kusto-grid-cell[data-column-index="${columnIndex}"]`);
+        const measureText = createTextMeasurer(visibleCell ?? this.element);
+        const measureHeadingText = createTextMeasurer(title ?? this.element);
+        this.setColumnWidth(columnIndex, calculateAutoFitWidth(
+            column,
+            columnIndex,
+            this.state.pages.values(),
+            measureText,
+            measureHeadingText,
+        ));
     }
 
     reorderColumn(from, to) {
@@ -869,9 +941,10 @@ class ResultGrid {
         });
         this.state.pendingContinuation = requestId;
         this.updateContinueButton();
-        this.updateStatus(selection
-            ? 'Creating snapshot from selection...'
-            : 'Creating snapshot from filtered results...');
+        this.updateStatus(continuationProgressMessage(
+            Boolean(selection),
+            this.state.draftFilters.size > 0,
+        ));
     }
 
     updateContinueButton() {
@@ -885,11 +958,10 @@ class ResultGrid {
             || !filtersEqual(this.state.draftFilters, this.state.filters)
             || !sortsEqual(this.state.draftSort, this.state.sort),
         );
-        this.continueButton.textContent = selection
-            ? 'Continue selection'
-            : this.state.draftFilters.size > 0
-                ? 'Continue filtered results'
-                : 'Continue results';
+        this.continueButton.textContent = continuationActionLabel(
+            Boolean(selection),
+            this.state.draftFilters.size > 0,
+        );
     }
 
     post(type, body, state = this.state) {
@@ -993,21 +1065,84 @@ function defaultColumnWidth(column) {
     return Math.max(110, Math.min(260, 48 + String(column.name).length * 8));
 }
 
-function setCellValue(cell, value) {
+export function continuationActionLabel(hasSelection, hasFilters) {
+    if (hasSelection) {
+        return 'Create cell from selection';
+    }
+    if (hasFilters) {
+        return 'Create cell from filtered results';
+    }
+    return 'Create cell from all results';
+}
+
+export function continuationProgressMessage(hasSelection, hasFilters) {
+    if (hasSelection) {
+        return 'Creating snapshot from selection...';
+    }
+    if (hasFilters) {
+        return 'Creating snapshot from filtered results...';
+    }
+    return 'Creating snapshot from all results...';
+}
+
+export function calculateAutoFitWidth(
+    column,
+    columnIndex,
+    pages,
+    measureText,
+    measureHeadingText = measureText,
+) {
+    let widest = Math.max(
+        AUTO_FIT_MIN_WIDTH,
+        measureHeadingText(String(column.name)) + AUTO_FIT_HEADER_PADDING,
+        measureText(String(column.type)) + AUTO_FIT_VALUE_PADDING,
+    );
+    for (const page of pages) {
+        for (const row of page.rows) {
+            widest = Math.max(
+                widest,
+                measureText(displayCellText(row.values[columnIndex])) + AUTO_FIT_VALUE_PADDING,
+            );
+        }
+    }
+    return clampColumnWidth(Math.ceil(widest));
+}
+
+export function clampColumnWidth(width) {
+    return Math.max(MIN_COLUMN_WIDTH, Math.min(MAX_COLUMN_WIDTH, width));
+}
+
+export function displayCellText(value) {
     if (value === null || value === undefined) {
-        cell.textContent = '(null)';
-        cell.classList.add('null');
-        return;
+        return '(null)';
     }
     if (typeof value === 'object') {
         try {
-            cell.textContent = JSON.stringify(value);
+            return JSON.stringify(value);
         } catch {
-            cell.textContent = String(value);
+            return String(value);
         }
+    }
+    return String(value);
+}
+
+function createTextMeasurer(element) {
+    const context = document.createElement('canvas').getContext('2d');
+    if (context) {
+        context.font = getComputedStyle(element).font;
+    }
+    return value => context
+        ? context.measureText(value).width
+        : value.length * 8;
+}
+
+function setCellValue(cell, value) {
+    if (value === null || value === undefined) {
+        cell.textContent = displayCellText(value);
+        cell.classList.add('null');
         return;
     }
-    cell.textContent = String(value);
+    cell.textContent = displayCellText(value);
 }
 
 function sortGlyph(sort, columnIndex) {

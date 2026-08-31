@@ -434,10 +434,10 @@ Exit criteria:
 
 ### Phase 5: Snapshot continuation
 
-Status: implemented. The result grid can continue a rectangular selection or the complete ready
-filtered view into a labeled notebook cell. Exact snapshots remain local until the generated cell is
-run. Oversized filtered views offer a capability-checked live rerun only after an explicit warning;
-oversized selections and unsafe translations fail with a clear explanation.
+Status: implemented. The result grid can create a new cell from a rectangular selection or the
+complete ready filtered view. Exact snapshots remain local until the generated cell is run. Oversized
+filtered views offer a capability-checked live rerun only after an explicit warning; oversized
+selections and unsafe translations fail with a clear explanation.
 
 Deliverables:
 
@@ -457,6 +457,10 @@ Exit criteria:
 - Unsupported regex translations are reported rather than silently changed.
 
 ### Near-term follow-up: Result-grid usability
+
+Status: implemented. Cell-creation labels now describe their selection, filtered, or complete result
+scope. Manual column resizing supports widths far beyond the old 600-pixel limit, and double-clicking
+a resize handle fits the column to its heading and values in the currently loaded pages.
 
 Deliverables:
 
