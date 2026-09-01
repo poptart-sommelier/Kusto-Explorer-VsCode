@@ -27,7 +27,7 @@ The new workflow must make it practical to:
 3. Apply a separate regular expression filter to each result column.
 4. Continue an investigation from the exact locally filtered result when it is safe and practical.
 5. Explicitly offer a server-side rerun when an exact snapshot is too large to send back.
-6. Create follow-on KQL through right-click enrichment actions.
+6. Run user-provided KQL enrichments against selected result rows from a right-click workflow.
 7. Keep generated queries visible and editable so investigations remain understandable and auditable.
 8. Make wide and long result values practical to inspect without an arbitrary narrow column-width cap.
 9. As a stretch goal, allow Python cells to analyze KQL results as pandas DataFrames.
@@ -69,18 +69,14 @@ The new workflow must make it practical to:
 - Require confirmation before changing from exact-snapshot semantics to a live server rerun.
 - Never silently claim that a rerun is the same data as the earlier snapshot.
 
-### Initial enrichment actions
+### User-provided enrichments
 
-The first release will provide general investigation actions:
-
-- Include the selected value.
-- Exclude the selected value.
-- Open matching rows in a new KQL cell.
-- Summarize counts by the selected column.
-- Join on the selected value.
-
-Each action creates visible, editable KQL in a new cell. It does not invisibly mutate result rows.
-Security-specific and parsing-specific actions can be added later through the same extension point.
+- The user configures a folder on disk as the enrichment library.
+- That folder may contain zero or more grouping folders, each containing `.kql` snippet files.
+- The right-click enrichment picker groups snippets by folder and displays each `.kql` filename.
+- Enrichments are user-provided KQL, not a fixed set of built-in query-rewriting actions.
+- Running an enrichment creates visible, editable KQL in the next notebook cell and then uses the
+  notebook's active Kusto connection.
 
 ## User experience
 
@@ -161,29 +157,32 @@ Regex translation must be capability-checked because local .NET regex and Kusto 
 exactly the same syntax. Unsupported expressions must be identified rather than approximated
 silently.
 
-### Enrichment actions
+### Enrichment workflow
 
-Right-click actions receive a typed context containing:
+1. The user selects values from one or more rows and right-clicks a result value.
+2. The enrichment input is the union of every currently selected row and the row containing the
+   right-clicked value. Each row is included once, with all of its result columns.
+3. VS Code shows the configured enrichment snippets, grouped by containing folder and named by
+   `.kql` filename.
+4. The user chooses a snippet and supplies any inputs declared by its metadata header.
+5. The extension inserts a new KQL cell immediately below the source cell. The generated cell
+   contains, in order:
+   - A typed `datatable()` containing the complete enrichment input rows.
+   - Scalar variables describing the right-clicked column and value.
+   - A scalar representation of the selected column names.
+   - Any scalar values collected from the snippet's declared prompts.
+   - The selected `.kql` snippet.
+6. The generated cell is visible and editable before or during normal notebook execution.
 
-- Result-session identifier.
-- Source query and connection provenance.
-- Active filters.
-- Selected rows, columns, and cell value.
-- Kusto type information.
+Each snippet may contain a small metadata header declaring named run-time prompts. A prompt can be
+answered manually or from a selected result column, including datetime values. The first version does
+not restrict prompt sources or attempt to prove that a chosen column is compatible with the snippet;
+invalid choices are allowed to fail with the normal Kusto error.
 
-The initial actions behave as follows:
-
-| Action | Generated behavior |
-|---|---|
-| Include value | Add an equality predicate for the selected column and value. |
-| Exclude value | Add an inequality predicate for the selected column and value. |
-| Open matching rows | Reopen the source query with a matching predicate, subject to the snapshot/rerun rules above. |
-| Summarize counts | Create a query that groups by the selected column and returns counts. |
-| Join on value | Ask for a target table and key column, then create an editable join query. |
-
-The registry must decide whether an action applies to the selected type and context. The renderer
-only displays actions and reports selections; query construction belongs in testable client-side
-logic.
+The selected rows are embedded in KQL and run against the active live Kusto service; there is no local
+KQL execution engine. Existing typed literal escaping, UTF-8 query-text budgets, privacy warnings, and
+credential rules apply. If the generated query is too large, the enrichment must stop with a clear
+error rather than silently rerunning different source data.
 
 ## Architecture
 
@@ -220,7 +219,7 @@ Add the following client-side components:
 - A `NotebookController` for execution, cancellation, and execution order.
 - A notebook result manager that owns renderer messaging and result-session lifetimes.
 - A custom notebook output renderer for the virtualized result grid.
-- A filter model and enrichment action registry that contain no VS Code webview code.
+- A filter model and enrichment catalog that contain no VS Code webview code.
 
 Add `{ scheme: "vscode-notebook-cell", language: "kusto" }` to the language client document selector
 so existing language features work inside KQL cells.
@@ -477,21 +476,34 @@ Exit criteria:
   complete result into the renderer.
 - Renaming the action does not change exact-snapshot or live-rerun safety behavior.
 
-### Phase 6: Enrichment action registry
+### Phase 6: User-provided KQL enrichments
+
+Status: newly redesigned on September 1, 2026 and next to be implemented. This definition replaces
+the previous Phase 6 enrichment-action plan.
 
 Deliverables:
 
-- Implement a typed, testable action registry.
-- Add include, exclude, matching rows, summarize counts, and join actions.
-- Add target table/column selection for join generation.
-- Insert generated cells next to the source investigation context.
-- Use existing Kusto identifier and literal escaping helpers.
+- Add a setting and folder picker for the enrichment-library location.
+- Discover grouping folders and their `.kql` snippet files.
+- Read and validate the snippet metadata header and declared prompts.
+- Add a result-cell right-click request carrying the current selection and clicked-cell context.
+- Show a VS Code enrichment picker grouped by folder and named by `.kql` filename.
+- Project the union of selected rows and the right-clicked row, including every result column.
+- Collect declared inputs manually or from a selected column without source-type restrictions.
+- Generate the next KQL cell with a typed `datatable()`, context scalar variables, prompt values, and
+  the chosen snippet.
+- Reuse existing Kusto identifier/literal escaping, query-size budgets, warnings, and queued notebook
+  insertion.
 
 Exit criteria:
 
-- Each action applies only to compatible selections and types.
-- Generated KQL is visible and editable before execution.
-- Actions obey the same snapshot-size and rerun-confirmation rules.
+- Right-clicking a result value exposes every discovered snippet under its containing folder.
+- The generated `datatable()` contains all columns for each selected or right-clicked row exactly
+  once.
+- The snippet can access the clicked column/value, selected column names, and declared prompt values
+  through generated scalar variables.
+- Generated KQL is visible and editable in the next cell and runs using the active Kusto connection.
+- Oversized or malformed enrichments fail clearly without silently changing the selected data.
 
 ### Phase 7: Hardening and release
 
@@ -572,7 +584,8 @@ These are targets to validate with benchmarks, not reasons to hide errors or ret
 - Execution state transitions and cancellation.
 - Filter-model revision handling.
 - Renderer message validation.
-- KQL generation for every enrichment action.
+- Enrichment folder discovery, metadata parsing, prompt binding, row-union projection, and generated
+  KQL composition.
 - Exact-snapshot versus live-rerun prompts and labels.
 
 ### Integration tests
@@ -619,8 +632,8 @@ The first release will not include:
 - Transparent batching of many follow-on Azure queries.
 - Collaborative notebook execution.
 - A webview framework migration.
-- Security-specific IP, user, or host enrichment packs.
-- JSON, URL, or regex-group parsing enrichment packs.
+- Bundled security-specific IP, user, or host enrichment packs.
+- Bundled JSON, URL, or regex-group parsing enrichment packs.
 - Arrow transport unless JSON page measurements show that it is necessary.
 
 ## Relevant implementation areas
