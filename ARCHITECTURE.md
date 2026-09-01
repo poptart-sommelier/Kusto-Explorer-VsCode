@@ -244,11 +244,12 @@ uses `acquireVsCodeApi()` + document-level click delegation for events, and post
 the extension. There is **no React/bundler for webview content**; CDN libraries (Plotly, Cytoscape,
 simple-datatables) are loaded directly. New webview UIs should match this pattern.
 
-### 3.4 Planned notebooks and scalable result sessions
+### 3.4 Notebooks and scalable result sessions
 
 The investigative notebook design is additive: existing `.kql` editors and `.kqr` result viewers
-continue to use the current path, while `.kqlnb` files use VS Code's native Notebook API. The full
-product and delivery decisions are recorded in [PLAN.md](PLAN.md).
+continue to use the current path, while `.kqlnb` files use VS Code's native Notebook API. Work that
+has shipped is recorded in [PLAN.DONE.md](PLAN.DONE.md); work that has not is recorded in
+[PLAN.md](PLAN.md).
 
 The notebook file format is versioned independently of the extension. Version 1 stores ordered KQL
 and Markdown cells plus non-secret connection metadata. It deliberately has no serialized output
@@ -372,6 +373,69 @@ The notebook renderer sends only the continuation scope, selected row ranges, re
 ready view revision. The extension host validates the active result session, presents snapshot or
 live-rerun warnings, and inserts the generated KQL immediately after the source cell with persisted
 continuation metadata. Result rows remain in the C# session throughout generation.
+
+#### Ownership boundaries for the result renderer
+
+The custom notebook renderer communicates with the extension only through VS Code notebook renderer
+messaging. It never calls the language server or Azure directly.
+
+The renderer owns visible grid state, viewport and page requests, selection gestures, column layout,
+context-menu presentation, and accessible status and error messages.
+
+The renderer must never own the complete result dataset, query execution, regex evaluation over all
+rows, KQL generation, or connection and authentication state.
+
+Renderer display defaults: 200 rows are requested per page, filter edits are debounced briefly before
+evaluation, matching is case-insensitive unless a per-filter case-sensitive option is set, non-string
+values are matched against their invariant display text, and null is treated as a distinct empty
+display value. Columns may be resized manually up to practical browser limits and auto-fit from the
+heading and the widest value in loaded pages; there is no low fixed maximum width.
+
+#### Result-session provenance
+
+Every result session retains the original KQL, cluster and database identity, execution start and
+completion times, the result schema, source notebook and cell identity, the active local filter and
+sort model, and whether the query has been rerun since the displayed snapshot was created. This is
+what makes it possible to generate honest follow-on queries and to state whether an action used an
+exact snapshot or current server data.
+
+#### Result data handling and privacy
+
+- Result snapshots are treated as potentially sensitive.
+- Temporary result files live in session-scoped storage with restrictive access, and are removed when
+  their session is disposed and on recovery from an unclean shutdown.
+- All renderer messages are validated; the webview is not a trusted data source.
+- Kusto identifiers and literals are escaped through the shared helpers.
+- Authentication material never appears in renderer messages, notebook files, generated KQL, or
+  temporary result metadata.
+- Users are warned that values embedded in `datatable()` or `in (...)` query text may be retained in
+  service query logs.
+- Blob Storage upload, external data, and workspace ingestion are never used as a hidden fallback for
+  oversized data.
+
+#### Performance and reliability invariants
+
+Validated against a fixture of at least 100,000 rows and 20 mixed-type columns:
+
+- No complete result copy in the notebook renderer or the TypeScript extension host.
+- The first available page renders without waiting for display formatting of all rows.
+- Scrolling and selection stay responsive while rows are still arriving.
+- A typical single-column regex filter over 100,000 rows completes in roughly one second on a
+  development machine, and an active filter can be cancelled or superseded promptly.
+- Renderer memory is bounded to visible pages, cached adjacent pages, and grid metadata.
+- Local result-session memory is bounded, with excess data spilled rather than risking process
+  exhaustion.
+- Stale page and filter responses are rejected by result-session and view revision.
+
+These are engineering invariants to validate with benchmarks, not reasons to hide errors or return
+incomplete data.
+
+#### Compatibility
+
+Existing `.kql` files continue to use the current editor and result viewer, and existing `.kqr` files
+continue to preserve saved result snapshots. Notebook support is additive and requires no conversion.
+Existing result-table behavior is reused where practical, but the `simple-datatables` webview is not
+the foundation for the 100,000-row notebook grid.
 
 ---
 

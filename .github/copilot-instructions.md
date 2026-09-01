@@ -8,6 +8,10 @@ the two separate.
 For the full "why" behind everything below, read [`ARCHITECTURE.md`](../ARCHITECTURE.md). When a change
 contradicts these rules, prefer the architecture doc and update both.
 
+Planning and design docs follow a strict split described in [`AGENTS.md`](../AGENTS.md): `PLAN.md`
+holds only upcoming work and open questions, `PLAN.DONE.md` holds completed work, and
+`ARCHITECTURE.md` holds settled design. Read `AGENTS.md` before editing any of them.
+
 ## What this project is
 
 A VS Code extension that mimics the desktop **Kusto Explorer** app: edit multi-query `.kql` files, run
@@ -65,6 +69,8 @@ Always run the relevant tests and ensure the build passes before considering a c
 
 - Read [`ARCHITECTURE.md`](../ARCHITECTURE.md) before structural changes; keep it in sync when you
   change components, seams, or conventions.
+- Follow the documentation split in [`AGENTS.md`](../AGENTS.md): move finished work out of `PLAN.md`
+  into `PLAN.DONE.md`, and record settled design in `ARCHITECTURE.md`.
 - Keep changes minimal and focused; don't refactor or add abstractions that weren't asked for.
 - Prefer editing existing modules over adding new ones, and keep logic in the testable data-model half.
 - Validate your own work with the build + tests above rather than assuming success.

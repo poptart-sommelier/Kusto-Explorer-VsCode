@@ -1,163 +1,46 @@
-# Investigative Notebook and Scalable Results Plan
+# Plan: Upcoming Work
 
-## Status
+This file tracks **work that has not shipped yet** and **decisions that are still open**, for the
+investigative notebook and scalable result experience in Kusto Explorer for VS Code.
 
-This document records the agreed product choices and the proposed implementation plan for adding a
-notebook-based investigation workflow to Kusto Explorer for VS Code.
+- **Completed work** is recorded in [PLAN.DONE.md](PLAN.DONE.md).
+- **Settled architecture and design decisions** are recorded in [ARCHITECTURE.md](ARCHITECTURE.md).
 
-The plan is intentionally separate from the existing `.kql` editor and `.kqr` result viewer. Those
-features remain supported while the notebook workflow is built and evaluated.
+When a phase below is implemented and validated, move its entry into `PLAN.DONE.md` and record any
+lasting design decisions in `ARCHITECTURE.md`. See [AGENTS.md](AGENTS.md) for the rules that keep
+these three documents distinct.
 
-Phase 1 was implemented on August 28, 2026. It defines the versioned notebook and result-session
-contracts, adds repeatable 100,000-row server and client baseline tools, records service query-text
-budgets, and documents the planned ownership and lifecycle seams in `ARCHITECTURE.md`. The contracts
-are not wired to runtime handlers until the scalable result-session implementation begins.
+The notebook workflow is additive. Existing `.kql` editors and `.kqr` result viewers remain supported
+while it is built and evaluated.
 
-Phase 2 was implemented on August 28, 2026. Native `.kqlnb` files now support KQL and Markdown cells,
-connection selection, sequential execution, cancellation, execution ordering, and inline text
-results. Until Phase 3 replaces whole-result transport, notebook queries and rendered previews use
-explicit temporary safety limits described below.
+---
 
-## Goals
+## Remaining goals
 
-The new workflow must make it practical to:
+1. Run user-provided KQL enrichments against selected result rows from a right-click workflow.
+2. Harden the notebook experience against real clusters, large results, and failure cases.
+3. As a stretch goal, allow Python cells to analyze KQL results as pandas DataFrames.
 
-1. Write and run KQL in a native VS Code notebook.
-2. Inspect approximately 100,000 result rows without freezing the extension host or webview.
-3. Apply a separate regular expression filter to each result column.
-4. Continue an investigation from the exact locally filtered result when it is safe and practical.
-5. Explicitly offer a server-side rerun when an exact snapshot is too large to send back.
-6. Run user-provided KQL enrichments against selected result rows from a right-click workflow.
-7. Keep generated queries visible and editable so investigations remain understandable and auditable.
-8. Make wide and long result values practical to inspect without an arbitrary narrow column-width cap.
-9. As a stretch goal, allow Python cells to analyze KQL results as pandas DataFrames.
+Goals that are already met are listed in [PLAN.DONE.md](PLAN.DONE.md).
 
-## Confirmed product decisions
+---
 
-### Native notebooks
+## Phase 6: User-provided KQL enrichments
 
-- Use the native VS Code Notebook API rather than simulating inline results in `.kql` editors.
-- Use a dedicated `.kqlnb` file format.
-- Support KQL code cells and Markdown cells.
-- Display query results inline beneath the cell that produced them.
-- Preserve the existing `.kql` query and `.kqr` result experiences.
+**Status: next to be implemented.** Redesigned September 1, 2026. This definition replaces an earlier
+Phase 6 concept that generated built-in include/exclude/summarize/join queries; that concept is
+abandoned, not deferred.
 
-### Saved notebook contents
-
-- Save KQL cells, Markdown cells, cell order, and non-secret notebook metadata.
-- Do not save query result rows by default.
-- Reopening a notebook therefore restores the investigation text but requires cells to be run again
-  before results appear.
-- Never persist access tokens or other credentials in a notebook.
-
-### Regex filtering
-
-- Provide a separate regex filter for every result column.
-- Combine active column filters with logical `AND`.
-- Run filters against the exact local result snapshot, not against Azure.
-- Keep the user interface responsive while a filter is evaluated.
-- Show invalid regular expressions as errors instead of treating them as valid filters with no
-  matches.
-
-### Follow-on queries
-
-- Prefer the exact filtered snapshot when it can be represented safely in a follow-on query.
-- Generate an editable KQL `datatable()` for a snapshot that fits within the target service's query
-  text limit.
-- If the snapshot is too large, explain why and offer to rerun the source query with equivalent KQL
-  filters.
-- Require confirmation before changing from exact-snapshot semantics to a live server rerun.
-- Never silently claim that a rerun is the same data as the earlier snapshot.
-
-### User-provided enrichments
+### Agreed product decisions
 
 - The user configures a folder on disk as the enrichment library.
 - That folder may contain zero or more grouping folders, each containing `.kql` snippet files.
-- The right-click enrichment picker groups snippets by folder and displays each `.kql` filename.
+- The right-click picker groups snippets by containing folder and displays each `.kql` filename.
 - Enrichments are user-provided KQL, not a fixed set of built-in query-rewriting actions.
-- Running an enrichment creates visible, editable KQL in the next notebook cell and then uses the
+- Running an enrichment creates visible, editable KQL in the next notebook cell and uses the
   notebook's active Kusto connection.
 
-## User experience
-
-### Basic execution
-
-1. The user opens or creates a `.kqlnb` notebook.
-2. The user selects a Kusto connection and database using the existing connection system.
-3. The user writes KQL in a code cell.
-4. Running the cell shows execution progress, supports cancellation, and displays results inline.
-5. Markdown cells can document assumptions, findings, and next steps between query cells.
-6. Rerunning a cell replaces its active result session after the new execution succeeds.
-
-KQL notebook cells must receive the same completion, diagnostics, formatting, hover, and navigation
-support as ordinary KQL documents.
-
-### Result grid
-
-The result grid will:
-
-- Render only the visible rows plus a small buffer.
-- Request result pages as the user scrolls.
-- Preserve Kusto scalar types instead of converting the whole result to display strings up front.
-- Support column resize, reorder, sorting, copying, and row or cell selection.
-- Allow columns to be widened as far as the user needs, with horizontal scrolling instead of a low
-  fixed maximum width.
-- Provide an auto-fit action that sizes a column from its heading and widest loaded display value;
-  manual resizing remains available when values are wider than the sampled page.
-- Show row counts for both the complete snapshot and the currently filtered view.
-- Show filter progress and allow an in-progress filter operation to be cancelled.
-- Preserve stable row ordering unless the user explicitly sorts.
-
-Proposed initial display defaults:
-
-- Request 200 rows per page.
-- Debounce filter edits briefly before evaluation.
-- Match case-insensitively by default, with a per-filter case-sensitive option.
-- Match against the displayed invariant representation of non-string values.
-- Treat null as a distinct empty display value and document that behavior in the filter UI.
-
-These are implementation defaults, not immutable file-format behavior.
-
-### Creating cells from results
-
-The notebook will expose **Create cell from results** as the general action. Its visible label should
-describe the current scope:
-
-- **Create cell from selection** for a rectangular selection.
-- **Create cell from filtered results** when filters are active.
-- **Create cell from all results** for the complete ready view.
-
-Avoid **Continue results** because it does not explain that the action creates a new editable cell.
-
-#### Exact snapshot path
-
-When the required rows fit within a safe service-specific text budget:
-
-1. Project only the columns needed by the continuation.
-2. Preserve their Kusto scalar types.
-3. Escape values through the existing Kusto literal helpers.
-4. Generate a new cell containing a `datatable()` named `LocalResult`.
-5. Place the cursor after `LocalResult` so the user can add joins, summaries, or other operators.
-
-The size check must use UTF-8 bytes for the complete generated query, not an arbitrary row-count
-limit. A few long values can exceed the budget even when the row count is small.
-
-#### Live rerun path
-
-When the exact snapshot does not fit:
-
-1. Explain that the rows cannot be embedded within the service's query-text limit.
-2. Offer to generate a query that reruns the original source query.
-3. Show the generated KQL filters before execution.
-4. State that newly added, removed, or changed server rows may alter the result.
-5. Run only after the user confirms.
-
-The generated query should wrap the original query and append supported output-column predicates.
-Regex translation must be capability-checked because local .NET regex and Kusto regex do not support
-exactly the same syntax. Unsupported expressions must be identified rather than approximated
-silently.
-
-### Enrichment workflow
+### Workflow
 
 1. The user selects values from one or more rows and right-clicks a result value.
 2. The enrichment input is the union of every currently selected row and the row containing the
@@ -172,7 +55,7 @@ silently.
    - A scalar representation of the selected column names.
    - Any scalar values collected from the snippet's declared prompts.
    - The selected `.kql` snippet.
-6. The generated cell is visible and editable before or during normal notebook execution.
+6. The generated cell is visible and editable, and is not executed automatically.
 
 Each snippet may contain a small metadata header declaring named run-time prompts. A prompt can be
 answered manually or from a selected result column, including datetime values. The first version does
@@ -184,318 +67,21 @@ KQL execution engine. Existing typed literal escaping, UTF-8 query-text budgets,
 credential rules apply. If the generated query is too large, the enrichment must stop with a clear
 error rather than silently rerunning different source data.
 
-## Architecture
-
-The design preserves the existing two-process architecture and uses the existing LSP/custom
-`kusto/*` JSON-RPC channel.
-
-```mermaid
-flowchart LR
-    NB["VS Code notebook<br/>KQL and Markdown cells"]
-    CTRL["Notebook controller<br/>TypeScript"]
-    MSG["Notebook renderer messaging"]
-    GRID["Virtualized result grid"]
-    RPC["Typed kusto/* RPC seam"]
-    EXEC["Query manager<br/>local C# process"]
-    STORE["Local result-session store"]
-    KUSTO[("ADX / Azure Monitor")]
-
-    NB --> CTRL
-    CTRL --> RPC
-    RPC --> EXEC
-    EXEC --> KUSTO
-    EXEC --> STORE
-    GRID <--> MSG
-    MSG <--> CTRL
-    CTRL <--> RPC
-    RPC <--> STORE
-```
-
-### Notebook components
-
-Add the following client-side components:
-
-- A `NotebookSerializer` for the versioned `.kqlnb` JSON format.
-- A `NotebookController` for execution, cancellation, and execution order.
-- A notebook result manager that owns renderer messaging and result-session lifetimes.
-- A custom notebook output renderer for the virtualized result grid.
-- A filter model and enrichment catalog that contain no VS Code webview code.
-
-Add `{ scheme: "vscode-notebook-cell", language: "kusto" }` to the language client document selector
-so existing language features work inside KQL cells.
-
-### Notebook file format
-
-The serializer should use an explicitly versioned JSON structure containing:
-
-- Format version.
-- Notebook metadata.
-- Ordered code and Markdown cells.
-- Cell language and source text.
-- Stable cell identifiers where required for metadata.
-- A non-secret connection reference or enough display metadata to resolve an existing connection.
-
-Outputs are deliberately omitted during serialization. Unknown future metadata should be retained
-when possible so a newer notebook is not damaged by an older extension.
-
-### Local result sessions
-
-The current query path materializes the complete result, serializes it through JSON-RPC, copies it
-into the extension host, formats every cell, and embeds the full dataset in a webview. That approach
-must not be used for notebook-scale results.
-
-Instead, the local C# language-server process will own each result snapshot:
-
-- Read query rows incrementally from the data reader.
-- Store each value once in a typed result store.
-- Return a result-session identifier and schema instead of returning all rows.
-- Expose paged reads, local filtering, local sorting, selection projection, and disposal through the
-  existing typed server interface.
-- Report execution state and available row counts while results are arriving.
-- Dispose sessions when a cell is replaced, a notebook closes, the extension shuts down, or an idle
-  retention limit is reached.
-
-The result store should be behind an interface so tests can use a small in-memory implementation.
-The production implementation should enforce a memory budget and spill large sessions to a
-session-scoped temporary file. The storage format should be selected after benchmarking rather than
-committing immediately to Arrow, SQLite, or another dependency.
-
-### Proposed RPC responsibilities
-
-Exact names can follow existing conventions, but the typed seam needs operations equivalent to:
-
-| Operation | Responsibility |
-|---|---|
-| Start query | Begin execution and return an operation/session identifier. |
-| Cancel query | Cancel remote execution and local materialization. |
-| Get result status | Return schema, progress, row counts, completion, and errors. |
-| Set result view | Apply the complete filter and sort model atomically. |
-| Get result page | Return one typed page from the current result view. |
-| Get result projection | Return selected rows and columns for copy or continuation. |
-| Dispose result | Release memory, temporary files, and related state. |
-
-Requests must be cancellable. A superseded filter or page request must not block the latest request.
-The client `IServer`, concrete `Server`, and `NullServer` implementations must remain in agreement.
-
-### Renderer communication
-
-The custom notebook renderer communicates with the extension through VS Code notebook renderer
-messaging. It must not call the language server or Azure directly.
-
-The renderer owns:
-
-- Visible grid state.
-- Viewport and page requests.
-- Selection gestures.
-- Column layout.
-- Context-menu presentation.
-- Accessible status and error messages.
-
-It must not own:
-
-- The complete result dataset.
-- Query execution.
-- Regex evaluation over all rows.
-- KQL generation.
-- Connection or authentication state.
-
-### Regex execution
-
-Regex filtering runs in the local C# process against the stored snapshot. This keeps the extension
-host and renderer responsive and avoids sending all rows to the webview.
-
-The filter engine must:
-
-- Compile each active column regex once per filter operation.
-- Combine active filters with `AND`.
-- Use culture-invariant matching.
-- Support cancellation when the user edits a filter.
-- Apply a bounded regex timeout or a safe non-backtracking mode.
-- Return useful errors for unsupported or unsafe expressions.
-- Avoid rebuilding formatted strings repeatedly when the same filter is evaluated.
-- Keep the prior valid view visible while a replacement filter is invalid or still running.
-
-Filtering locally means no extra Azure query and no change to the captured snapshot.
-
-### Provenance
-
-Every result session must retain:
-
-- Original KQL.
-- Cluster and database identity.
-- Execution start and completion times.
-- Result schema.
-- Source notebook and cell identity.
-- Active local filter and sort model.
-- Whether the query has been rerun since the displayed snapshot was created.
-
-This information is required to generate honest follow-on queries and explain whether an action uses
-an exact snapshot or current server data.
-
-## Service constraints
-
-The design must account for different Kusto-compatible services:
-
-- Azure Monitor and Log Analytics impose a practical 64 KB UTF-8 query-text limit.
-- Native Azure Data Explorer permits larger queries, but generated queries still need an explicit
-  measured budget.
-- Query results are also constrained by service row, data-size, and timeout limits.
-- Large lists in `in` expressions can lose text-index optimization even before reaching the text
-  limit.
-- Values embedded in generated query text may appear in service query logs.
-
-Therefore:
-
-- Do not promise that an arbitrary 100,000-row snapshot can be sent back to the service.
-- Do not upload temporary data to Blob Storage or ingest it into a workspace in the first release.
-- Do not embed credentials or sensitive external-data URLs in generated KQL.
-- Warn before putting a large number of potentially sensitive values into query text.
-- Prefer predicate replay for large continuations, but only after explicit confirmation.
-
-## Delivery phases
-
-### Phase 1: Contracts and performance baseline
-
-Deliverables:
-
-- Define the versioned `.kqlnb` format.
-- Define result-session state, lifecycle, and typed RPC contracts.
-- Add a synthetic mixed-type dataset with at least 100,000 rows.
-- Measure the current query/result path for time, memory, serialized size, and UI responsiveness.
-- Record service-aware generated-query size budgets.
-- Update `ARCHITECTURE.md` with the approved notebook and result-session seams.
-
-Exit criteria:
-
-- The protocol can represent execution progress, paging, filtering, cancellation, and disposal.
-- Baseline measurements are repeatable.
-- No implementation requires putting the complete result into notebook output JSON.
-
-### Phase 2: Native notebook shell
-
-Deliverables:
-
-- Register the `.kqlnb` notebook type.
-- Implement serializer and controller.
-- Enable KQL language services in notebook cells.
-- Reuse existing connection selection and query execution.
-- Support Markdown, execution order, progress, errors, and cancellation.
-- Serialize cells and metadata without outputs.
-
-Exit criteria:
-
-- A notebook can be created, saved, reopened, and rerun.
-- KQL completion and diagnostics work in code cells.
-- No access token or result row is written to the notebook file.
-
-### Phase 3: Scalable local result sessions
-
-Status: implemented with server-owned, paged `DataTable` snapshots. The extension host and renderer
-never receive a whole result. Kusto.Data currently finishes parsing the server response before pages
-become available; true row-by-row arrival remains a later connection-layer improvement.
-
-Deliverables:
-
-- Replace whole-result notebook transport with local result sessions.
-- Materialize query rows incrementally into the result-store abstraction.
-- Add paged result retrieval and deterministic disposal.
-- Build the virtualized notebook grid.
-- Support typed display, scrolling, sorting, selection, copying, and column layout.
-- Add memory budgeting and temporary-file spill behavior if benchmarks require it.
-
-Exit criteria:
-
-- A 100,000-row mixed-type result can be browsed without a full copy in the renderer.
-- Scrolling does not block the extension host.
-- Cancelling or closing a notebook releases the result session and temporary storage.
-
-### Phase 4: Per-column regex filtering
-
-Status: implemented. Filters run against the retained local snapshot, combine with `AND`, default to
-case-insensitive matching, and can be made case-sensitive per column. Invalid or timed-out patterns
-leave the previous ready view available. Patterns are limited to 4,096 characters, each match has a
-100 ms timeout, and a complete evaluation is limited to five seconds.
-
-Deliverables:
-
-- Add a filter row with one regex input per column.
-- Implement the testable filter model and local server evaluator.
-- Add cancellation, invalid-pattern errors, timeouts, row counts, and progress.
-- Preserve filters while scrolling and when changing column layout.
-- Add local filtering tests using the 100,000-row fixture.
-
-Exit criteria:
-
-- Multiple column filters combine with `AND`.
-- Filtering does not issue a new Azure query.
-- Invalid or pathological regex input cannot freeze the extension or local server.
-- The grid remains interactive while filters are replaced or cancelled.
-
-### Phase 5: Snapshot continuation
-
-Status: implemented. The result grid can create a new cell from a rectangular selection or the
-complete ready filtered view. Exact snapshots remain local until the generated cell is run. Oversized
-filtered views offer a capability-checked live rerun only after an explicit warning; oversized
-selections and unsafe translations fail with a clear explanation.
-
-Deliverables:
-
-- Project selected or filtered rows from a result session.
-- Generate typed and correctly escaped `datatable()` KQL.
-- Measure complete generated query size in UTF-8 bytes.
-- Add service-specific safety budgets.
-- Compile supported local filters into KQL predicates.
-- Show a confirmation and semantic warning before a live rerun.
-- Clearly label generated cells as snapshot-based or rerun-based.
-
-Exit criteria:
-
-- Small snapshots produce valid KQL that represents the exact selected values.
-- Oversized snapshots never produce a query known to exceed the service limit.
-- A live rerun cannot occur without explicit user confirmation.
-- Unsupported regex translations are reported rather than silently changed.
-
-### Near-term follow-up: Result-grid usability
-
-Status: implemented. Cell-creation labels now describe their selection, filtered, or complete result
-scope. Manual column resizing supports widths far beyond the old 600-pixel limit, and double-clicking
-a resize handle fits the column to its heading and values in the currently loaded pages.
-
-Deliverables:
-
-- Rename the continuation control to the scope-specific **Create cell from...** labels above.
-- Remove the current low maximum column width.
-- Keep manual drag resizing available up to the practical canvas and browser limits.
-- Add column auto-fit based on the heading and widest loaded display value.
-- Preserve horizontal scrolling, virtualization, and saved in-session widths for very wide tables.
-
-Exit criteria:
-
-- A user can widen a column enough to read long values without truncation imposed by the extension.
-- Auto-fit produces a useful width for the values currently available without scanning or copying the
-  complete result into the renderer.
-- Renaming the action does not change exact-snapshot or live-rerun safety behavior.
-
-### Phase 6: User-provided KQL enrichments
-
-Status: newly redesigned on September 1, 2026 and next to be implemented. This definition replaces
-the previous Phase 6 enrichment-action plan.
-
-Deliverables:
-
-- Add a setting and folder picker for the enrichment-library location.
-- Discover grouping folders and their `.kql` snippet files.
-- Read and validate the snippet metadata header and declared prompts.
-- Add a result-cell right-click request carrying the current selection and clicked-cell context.
-- Show a VS Code enrichment picker grouped by folder and named by `.kql` filename.
-- Project the union of selected rows and the right-clicked row, including every result column.
-- Collect declared inputs manually or from a selected column without source-type restrictions.
-- Generate the next KQL cell with a typed `datatable()`, context scalar variables, prompt values, and
-  the chosen snippet.
-- Reuse existing Kusto identifier/literal escaping, query-size budgets, warnings, and queued notebook
-  insertion.
-
-Exit criteria:
+### Deliverables
+
+- A setting and folder picker for the enrichment-library location.
+- Discovery of grouping folders and their `.kql` snippet files.
+- Reading and validation of the snippet metadata header and declared prompts.
+- A result-cell right-click request carrying the current selection and clicked-cell context.
+- A VS Code enrichment picker grouped by folder and named by `.kql` filename.
+- Projection of the union of selected rows and the right-clicked row, including every result column.
+- Collection of declared inputs manually or from a selected column, without source-type restrictions.
+- Generation of the next KQL cell with a typed `datatable()`, context scalar variables, prompt values,
+  and the chosen snippet.
+- Reuse of existing Kusto identifier/literal escaping, query-size budgets, warnings, and queued
+  notebook insertion.
+
+### Exit criteria
 
 - Right-clicking a result value exposes every discovered snippet under its containing folder.
 - The generated `datatable()` contains all columns for each selected or right-clicked row exactly
@@ -505,7 +91,22 @@ Exit criteria:
 - Generated KQL is visible and editable in the next cell and runs using the active Kusto connection.
 - Oversized or malformed enrichments fail clearly without silently changing the selected data.
 
-### Phase 7: Hardening and release
+### Open questions for Phase 6
+
+These must be answered before or during implementation:
+
+- What exactly does the snippet metadata header look like, and how is it separated from runnable KQL?
+- What are the generated scalar variable names, and how are collisions with snippet-defined names
+  avoided?
+- How deep may the enrichment library nest, and how are folders below the first level presented?
+- What is shown when no enrichment folder is configured, or the folder contains no `.kql` files?
+- Should a discovered snippet list refresh while VS Code is running, or only at startup?
+
+---
+
+## Phase 7: Hardening and release
+
+**Status: not started.**
 
 Deliverables:
 
@@ -513,7 +114,8 @@ Deliverables:
 - Large-result and cancellation integration tests.
 - Session cleanup, crash recovery, and stale-message tests.
 - Real ADX and scoped Log Analytics smoke tests.
-- User documentation for notebooks, filtering, continuation semantics, and privacy warnings.
+- User documentation for notebooks, filtering, continuation semantics, enrichments, and privacy
+  warnings.
 - Telemetry limited to non-sensitive performance and failure information, following repository
   policy.
 
@@ -524,11 +126,15 @@ Exit criteria:
 - Temporary result data is removed after disposal.
 - Documentation clearly distinguishes local snapshots from live reruns.
 
-### Stretch goal: Python and pandas interoperability
+---
+
+## Stretch goal: Python and pandas interoperability
+
+**Status: design incomplete, paused by request.** Do not start implementation until the open questions
+below are answered.
 
 The notebook should eventually support KQL, Python, and Markdown cells, with the language/runtime
-shown clearly on every code cell. Python support should use the user's selected VS Code Jupyter
-kernel rather than bundling another Python runtime.
+shown clearly on every code cell.
 
 Proposed behavior:
 
@@ -543,84 +149,37 @@ Proposed behavior:
 - Cancelling a cell, closing the notebook, or restarting its kernel releases associated transfer and
   result-session state.
 
-This is a post-hardening stretch goal. It requires design work for kernel lifecycle, DataFrame type
-mapping, dependency discovery, cancellation, memory limits, and trust/security boundaries before an
-implementation phase is committed.
+### Open questions for Python support
 
-## Performance and reliability targets
+- Which runtime executes Python: the user's selected VS Code Jupyter kernel, or a Python process
+  managed by this extension? VS Code assigns one execution controller per notebook, so a `.kqlnb`
+  notebook cannot select a Kusto controller and a Jupyter kernel through the standard kernel picker.
+  The Jupyter extension's public API can execute code against a kernel that is already running for an
+  open notebook, which constrains how a Jupyter-backed design would have to work.
+- If the extension manages the runtime, what is its lifetime, and does state persist between cells?
+- How are Python environments and required packages discovered and reported when missing?
+- How are DataFrame outputs displayed, and do they reuse the Kusto result grid so that selections can
+  feed further work?
+- What are the memory, cancellation, and trust boundaries for executing user Python?
 
-Use a reference fixture of at least 100,000 rows and 20 mixed-type columns. Initial engineering
-targets are:
+This work also requires DataFrame type mapping before an implementation phase is committed.
 
-- No complete result copy in the notebook renderer.
-- No complete result copy in the TypeScript extension host.
-- Render the first available page without waiting for display formatting of all rows.
-- Keep scrolling and selection responsive while rows are still arriving.
-- Complete a typical single-column regex filter over 100,000 rows in approximately one second on a
-  development machine.
-- Cancel or supersede an active filter promptly.
-- Bound renderer memory to visible pages, cached adjacent pages, and grid metadata.
-- Bound local result-session memory and spill excess data rather than risking process exhaustion.
-- Reject stale page and filter responses by result-session and view revision.
+---
 
-These are targets to validate with benchmarks, not reasons to hide errors or return incomplete data.
+## Testing expectations for upcoming work
 
-## Testing strategy
+New work is expected to extend existing coverage rather than replace it. See [TESTING.md](TESTING.md)
+for how to run each suite.
 
-### C# server tests
+- **C# server tests** — enrichment row-union projection, typed `datatable()` composition, and UTF-8
+  query-size enforcement for enrichment output.
+- **TypeScript unit tests** — enrichment folder discovery, metadata parsing, prompt binding, picker
+  grouping, generated KQL composition, and renderer right-click message validation.
+- **Integration tests** — enrichment insertion into a live notebook, ordinary ADX and scoped Azure
+  Monitor connections, closing and rerunning cells while operations are active, and regression
+  coverage for existing `.kql` and `.kqr` behavior.
 
-- Incremental materialization and type preservation.
-- Page boundaries and stable ordering.
-- Multiple per-column filters with `AND` semantics.
-- Null, dynamic, datetime, numeric, and string matching.
-- Invalid, timed-out, cancelled, and superseded regex operations.
-- Session disposal and temporary-file cleanup.
-- Snapshot projection and UTF-8 query-size calculation.
-
-### TypeScript unit tests
-
-- Notebook serialization and output omission.
-- Connection metadata restoration.
-- Execution state transitions and cancellation.
-- Filter-model revision handling.
-- Renderer message validation.
-- Enrichment folder discovery, metadata parsing, prompt binding, row-union projection, and generated
-  KQL composition.
-- Exact-snapshot versus live-rerun prompts and labels.
-
-### Integration tests
-
-- KQL language features inside notebook cells.
-- Notebook save, reopen, and rerun.
-- Progressive result paging.
-- A 100,000-row result with filtering, sorting, copying, and selection.
-- Closing and rerunning cells while operations are active.
-- Ordinary ADX and scoped Azure Monitor connections.
-- Regression coverage for existing `.kql` and `.kqr` behavior.
-
-## Security and privacy
-
-- Treat result snapshots as potentially sensitive.
-- Keep temporary result files inside session-scoped storage with restrictive access.
-- Remove temporary files when their session is disposed and on recovery from an unclean shutdown.
-- Validate all renderer messages; the webview is not a trusted data source.
-- Escape Kusto identifiers and literals with shared helpers.
-- Never put authentication material in renderer messages, notebook files, generated KQL, or
-  temporary result metadata.
-- Warn that values embedded in `datatable()` or `in (...)` query text may be retained in service
-  query logs.
-- Do not introduce automatic Blob Storage upload, external data, or workspace ingestion as a hidden
-  fallback.
-
-## Compatibility and migration
-
-- Existing `.kql` files continue to use the current editor and result viewer.
-- Existing `.kqr` files continue to preserve saved result snapshots.
-- Notebook support is additive; no automatic conversion is required initially.
-- A later command may convert a `.kql` document into notebook cells, but it is outside the first
-  release.
-- Existing result table behavior should be reused where practical, but the current
-  `simple-datatables` webview is not the foundation for the 100,000-row notebook grid.
+---
 
 ## Explicitly deferred work
 
@@ -635,21 +194,9 @@ The first release will not include:
 - Bundled security-specific IP, user, or host enrichment packs.
 - Bundled JSON, URL, or regex-group parsing enrichment packs.
 - Arrow transport unless JSON page measurements show that it is necessary.
+- A command that converts an existing `.kql` document into notebook cells.
 
-## Relevant implementation areas
-
-- `src/Client/extension.ts` - notebook registration, composition, and language-client selector.
-- `src/Client/features/server.ts` - typed result-session RPC contract.
-- `src/Client/features/queryEditor.ts` - existing execution behavior to reuse without coupling the
-  notebook to the editor UI.
-- `src/Client/features/resultsViewer.ts` - existing result provenance and compatibility behavior.
-- `src/Client/features/dataTableProvider.ts` - behavior worth preserving, but not the scalable grid
-  foundation.
-- `src/Server/Server.cs` - custom `kusto/*` handlers.
-- `src/Server/Connections/ConnectionManager.cs` - query execution and current materialization
-  boundary.
-- `src/Server/Utilities/ResultData.cs` - current serializable result representation.
-- `ARCHITECTURE.md` - architectural contract that must be updated when implementation begins.
+---
 
 ## References
 
