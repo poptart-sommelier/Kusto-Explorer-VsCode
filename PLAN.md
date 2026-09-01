@@ -17,147 +17,10 @@ while it is built and evaluated.
 
 ## Remaining goals
 
-1. Run user-provided KQL enrichments against selected result rows from a right-click workflow.
-2. Harden the notebook experience against real clusters, large results, and failure cases.
-3. As a stretch goal, allow Python cells to analyze KQL results as pandas DataFrames.
+1. Harden the notebook experience against real clusters, large results, and failure cases.
+2. As a stretch goal, allow Python cells to analyze KQL results as pandas DataFrames.
 
 Goals that are already met are listed in [PLAN.DONE.md](PLAN.DONE.md).
-
----
-
-## Phase 6: User-provided KQL enrichments
-
-**Status: next to be implemented.** Redesigned September 1, 2026. This definition replaces an earlier
-Phase 6 concept that generated built-in include/exclude/summarize/join queries; that concept is
-abandoned, not deferred.
-
-### Agreed product decisions
-
-- The user configures a folder on disk as the enrichment library.
-- That folder may contain zero or more grouping folders, each containing `.kql` snippet files.
-- The right-click picker groups snippets by containing folder and displays each `.kql` filename.
-- Enrichments are user-provided KQL, not a fixed set of built-in query-rewriting actions.
-- Running an enrichment creates visible, editable KQL in the next notebook cell and uses the
-  notebook's active Kusto connection.
-
-### Workflow
-
-1. The user selects values from one or more rows and right-clicks a result value.
-2. The enrichment input is the union of every currently selected row and the row containing the
-   right-clicked value. Each row is included once, with all of its result columns.
-3. VS Code shows the configured enrichment snippets, grouped by containing folder and named by
-   `.kql` filename.
-4. The user chooses a snippet and supplies any inputs declared by its metadata header.
-5. The extension inserts a new KQL cell immediately below the source cell. The generated cell
-   contains, in order:
-   - A typed `datatable()` containing the complete enrichment input rows.
-   - Scalar variables describing the right-clicked column and value.
-   - A scalar representation of the selected column names.
-   - Any scalar values collected from the snippet's declared prompts.
-   - The selected `.kql` snippet.
-6. The generated cell is visible and editable, and is not executed automatically.
-
-Each snippet may contain a small metadata header declaring named run-time prompts. A prompt can be
-answered manually or from a selected result column, including datetime values. The first version does
-not restrict prompt sources or attempt to prove that a chosen column is compatible with the snippet;
-invalid choices are allowed to fail with the normal Kusto error.
-
-The selected rows are embedded in KQL and run against the active live Kusto service; there is no local
-KQL execution engine. Existing typed literal escaping, UTF-8 query-text budgets, privacy warnings, and
-credential rules apply. If the generated query is too large, the enrichment must stop with a clear
-error rather than silently rerunning different source data.
-
-### Deliverables
-
-- A `msKustoExplorer.notebook.enrichmentFolder` setting and a folder picker that writes it.
-- Recursive discovery of `.kql` snippet files and their picker groups.
-- Reading and validation of the snippet metadata header and declared prompts.
-- A result-cell right-click request carrying the current selection and clicked-cell context.
-- A VS Code enrichment picker grouped by relative folder path and named by `.kql` filename.
-- Projection of the union of selected rows and the right-clicked row, including every result column.
-- Collection of declared inputs manually or from a selected column, without source-type restrictions.
-- Generation of the next KQL cell with a typed `datatable()`, context scalar variables, prompt values,
-  and the chosen snippet.
-- Reuse of existing Kusto identifier/literal escaping, query-size budgets, warnings, and queued
-  notebook insertion.
-
-### Exit criteria
-
-- Right-clicking a result value exposes every discovered snippet under its containing folder.
-- The generated `datatable()` contains all columns for each selected or right-clicked row exactly
-  once.
-- The snippet can access the clicked column/value, selected column names, and declared prompt values
-  through generated scalar variables.
-- Generated KQL is visible and editable in the next cell and runs using the active Kusto connection.
-- Oversized or malformed enrichments fail clearly without silently changing the selected data.
-
-### Design answers proposed September 1, 2026
-
-These answer the questions that previously blocked Phase 6. They are **proposed, not yet confirmed by
-the product owner**, and none of them is implemented. Confirm or override before implementation, then
-move the settled parts into `ARCHITECTURE.md` as they are built.
-
-#### Snippet metadata header
-
-A snippet stays a plain, valid `.kql` file so it can be opened, highlighted, and edited with the
-existing Kusto language support. Metadata is a run of KQL line comments at the top of the file, and
-the header ends at the first line that is neither a comment nor blank:
-
-```kusto
-// @name Failed sign-ins for device
-// @description Correlates the selected rows against sign-in logs.
-// @prompt lookback:timespan Lookback window
-SigninLogs
-| where TimeGenerated > ago(lookback)
-| join kind=inner LocalResult on DeviceName
-```
-
-- `@name` optionally overrides the filename shown in the picker.
-- `@description` optionally supplies picker detail text.
-- `@prompt <variableName>:<kustoType> <prompt text>` declares one run-time input.
-- Unknown `@` directives are ignored, so older extensions do not break on newer snippets.
-- The header is stripped from the generated cell; the remaining KQL is inserted verbatim.
-
-#### Generated names
-
-The generated cell defines, in order:
-
-| Name | Type | Contents |
-|---|---|---|
-| `LocalResult` | `datatable()` | Every enrichment input row, all columns, typed |
-| `ClickedColumn` | `string` | Name of the right-clicked column |
-| `ClickedValue` | column's Kusto type | The right-clicked value |
-| `SelectedColumns` | `dynamic` | Array of the selected column names |
-
-`LocalResult` deliberately reuses the name already generated by snapshot continuation, so users learn
-one convention.
-
-Prompt values are emitted as `let <variableName> = <typed literal>;` after the context names. The four
-names above are reserved: a snippet that declares a prompt using one of them is rejected before
-insertion, with an error naming the conflict.
-
-#### Library layout and discovery
-
-- One setting, `msKustoExplorer.notebook.enrichmentFolder`, holds the library path.
-- Discovery is recursive to a depth of five folders, skipping hidden and dot-prefixed folders.
-- A snippet's picker group is its folder path relative to the library root, joined with `/`. Snippets
-  directly in the root appear ungrouped.
-- The library is re-scanned each time the picker opens. There is no file watcher and no restart
-  requirement, so the list can never be stale.
-
-#### Empty and unconfigured states
-
-The picker is never shown empty:
-
-- No folder configured — explain that no enrichment folder is set and offer a **Select Folder…**
-  action that writes the setting.
-- Folder configured but no `.kql` files found — name the path that was searched and offer to open it.
-- A snippet whose header fails to parse is listed with its error and cannot be run, rather than being
-  hidden silently.
-
-### Open questions for Phase 6
-
-- None outstanding; the answers above need confirmation rather than further discovery.
 
 ---
 
@@ -230,11 +93,10 @@ for how to run each suite.
 
 - **C# server tests** — enrichment row-union projection, typed `datatable()` composition, and UTF-8
   query-size enforcement for enrichment output.
-- **TypeScript unit tests** — enrichment folder discovery, metadata parsing, prompt binding, picker
-  grouping, generated KQL composition, and renderer right-click message validation.
-- **Integration tests** — enrichment insertion into a live notebook, ordinary ADX and scoped Azure
-  Monitor connections, closing and rerunning cells while operations are active, and regression
-  coverage for existing `.kql` and `.kqr` behavior.
+- **TypeScript unit tests** — renderer message validation for new surfaces, and coverage for any new
+  testable data model.
+- **Integration tests** — ordinary ADX and scoped Azure Monitor connections, closing and rerunning
+  cells while operations are active, and regression coverage for existing `.kql` and `.kqr` behavior.
 
 ---
 

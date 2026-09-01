@@ -179,6 +179,7 @@ class ResultGrid {
                 queuedView: false,
                 automaticViewRetries: 0,
                 pendingContinuation: undefined,
+                pendingEnrichment: undefined,
                 filterTimer: undefined,
             };
             this.tableStates.set(table.id, state);
@@ -367,6 +368,10 @@ class ResultGrid {
                 cell.addEventListener('click', event => {
                     this.select(viewIndex, displayIndex, displayIndex, event.shiftKey);
                 });
+                cell.addEventListener('contextmenu', event => {
+                    event.preventDefault();
+                    this.requestEnrichment(viewIndex, displayIndex, columnIndex);
+                });
                 rowElement.append(cell);
             });
             this.canvas.append(rowElement);
@@ -499,6 +504,16 @@ class ResultGrid {
                 this.updateContinueButton();
                 this.updateStatus();
             }
+        } else if (message.type === 'enrichmentResult' || message.type === 'enrichmentCancelled') {
+            if (targetState.pendingEnrichment !== message.requestId) {
+                return;
+            }
+            targetState.pendingEnrichment = undefined;
+            if (targetState === this.state) {
+                this.updateStatus(message.type === 'enrichmentResult'
+                    ? `Created a cell for '${message.name}'.`
+                    : undefined);
+            }
         } else if (message.type === 'copyResult' && targetState === this.state) {
             this.status.textContent = `Copied ${message.copiedRows.toLocaleString()} row${message.copiedRows === 1 ? '' : 's'}.`;
         } else if (message.type === 'viewCancelled') {
@@ -553,6 +568,10 @@ class ResultGrid {
             }
             this.sendQueuedView(targetState);
         } else if (message.type === 'requestError') {
+            const failedEnrichment = targetState.pendingEnrichment === message.requestId;
+            if (failedEnrichment) {
+                targetState.pendingEnrichment = undefined;
+            }
             const failedPage = targetState.pageRequests.get(message.requestId);
             if (failedPage) {
                 targetState.pageRequests.delete(message.requestId);
@@ -962,6 +981,48 @@ class ResultGrid {
             Boolean(selection),
             this.state.draftFilters.size > 0,
         );
+    }
+
+    /**
+     * Sends the right-clicked cell and the current selection for enrichment. The input rows are the
+     * union of the selected rows and the clicked row, each included once with all of its columns.
+     */
+    requestEnrichment(viewIndex, displayIndex, columnIndex) {
+        if (this.state.pendingEnrichment || this.state.pendingView || this.state.queuedView) {
+            return;
+        }
+        const selection = this.state.selection;
+        const rowRanges = [];
+        if (selection && viewIndex >= selection.firstRow && viewIndex <= selection.lastRow) {
+            rowRanges.push({
+                offset: selection.firstRow,
+                count: selection.lastRow - selection.firstRow + 1,
+            });
+        } else if (selection) {
+            const before = viewIndex < selection.firstRow;
+            const clicked = { offset: viewIndex, count: 1 };
+            const selected = {
+                offset: selection.firstRow,
+                count: selection.lastRow - selection.firstRow + 1,
+            };
+            rowRanges.push(...(before ? [clicked, selected] : [selected, clicked]));
+        } else {
+            rowRanges.push({ offset: viewIndex, count: 1 });
+        }
+
+        const selectedColumnIndexes = selection
+            ? this.state.order.slice(selection.firstColumn, selection.lastColumn + 1)
+            : [columnIndex];
+        const requestId = this.post('enrich', {
+            rowRanges,
+            columnIndexes: [...this.state.order],
+            clickedRowIndex: viewIndex,
+            clickedColumnIndex: columnIndex,
+            selectedColumnIndexes,
+        });
+        this.state.pendingEnrichment = requestId;
+        this.updateStatus('Choose an enrichment...');
+        void displayIndex;
     }
 
     post(type, body, state = this.state) {

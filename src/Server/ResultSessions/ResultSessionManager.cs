@@ -468,6 +468,138 @@ public sealed class ResultSessionManager : IResultSessionManager
         }
     }
 
+    public Task<CreateResultSessionEnrichmentResult> CreateEnrichmentAsync(
+        CreateResultSessionEnrichmentParams parameters,
+        CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(parameters);
+        cancellationToken.ThrowIfCancellationRequested();
+        var session = GetSession(parameters.SessionId);
+
+        lock (session.SyncRoot)
+        {
+            session.Touch();
+            var table = GetCompletedTable(session, parameters.TableId);
+            ValidateViewRevision(table, parameters.ViewRevision);
+            ValidateColumnIndexes(table, parameters.ColumnIndexes);
+            ValidateColumnIndexes(table, parameters.SelectedColumnIndexes);
+            ValidateColumnIndexes(table, [parameters.ClickedColumnIndex]);
+            if (string.IsNullOrWhiteSpace(parameters.Snippet))
+                throw new ArgumentException("The enrichment snippet is empty.", nameof(parameters));
+            if (parameters.ClickedRowIndex < 0
+                || parameters.ClickedRowIndex >= table.ViewSourceIndexes.LongLength)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(parameters),
+                    "The right-clicked row is outside the current view.");
+            }
+
+            var projectionMap = GetProjectionMap(
+                table,
+                ResultSessionContractValues.ProjectionSelection,
+                parameters.RowRanges);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var clickedRow = table.Data.Rows[table.ViewSourceIndexes[parameters.ClickedRowIndex]];
+            var declarations = BuildEnrichmentDeclarations(table, parameters, clickedRow);
+            var budget = GetQueryTextBudgetBytes(session.EffectiveCluster);
+            var generated = GenerateDataTable(
+                table,
+                projectionMap,
+                parameters.ColumnIndexes,
+                "// Enrichment over retained query results; embedded values run against live data.\n",
+                $"\n];\n{declarations}\n{parameters.Snippet.Trim()}",
+                budget,
+                cancellationToken);
+
+            return Task.FromResult(new CreateResultSessionEnrichmentResult
+            {
+                Query = generated.Query,
+                QueryTextBytes = generated.TextBytes,
+                QueryTextBudgetBytes = budget,
+                ProjectedRows = projectionMap.Count
+            });
+        }
+    }
+
+    /// <summary>
+    /// Emits the context and prompt <c>let</c> statements that precede the snippet. Column-bound
+    /// prompts and the clicked value are formatted from the retained row with their real Kusto
+    /// types; manually entered values are escaped only when the snippet declared them as strings.
+    /// </summary>
+    private static string BuildEnrichmentDeclarations(
+        SessionTable table,
+        CreateResultSessionEnrichmentParams parameters,
+        DataRow clickedRow)
+    {
+        var clickedColumn = table.Data.Columns[parameters.ClickedColumnIndex];
+        var selectedColumns = string.Join(
+            ", ",
+            parameters.SelectedColumnIndexes.Select(index =>
+                KustoGenerator.GetStringLiteral(table.Data.Columns[index].ColumnName)));
+        var builder = new StringBuilder();
+        builder.Append(
+            $"let ClickedColumn = {KustoGenerator.GetStringLiteral(clickedColumn.ColumnName)};\n");
+        builder.Append(
+            $"let ClickedValue = {KustoGenerator.GetLiteral(clickedRow[parameters.ClickedColumnIndex], clickedColumn.DataType)};\n");
+        builder.Append($"let SelectedColumns = dynamic([{selectedColumns}]);\n");
+
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var prompt in parameters.Prompts)
+        {
+            if (!IsValidEnrichmentName(prompt.Name))
+                throw new ArgumentException($"Invalid prompt name '{prompt.Name}'.", nameof(parameters));
+            if (ResultSessionContractValues.EnrichmentReservedNames.Contains(prompt.Name))
+            {
+                throw new ArgumentException(
+                    $"Prompt '{prompt.Name}' uses a name reserved by the generated cell.",
+                    nameof(parameters));
+            }
+            if (!names.Add(prompt.Name))
+            {
+                throw new ArgumentException(
+                    $"Prompt '{prompt.Name}' is declared more than once.",
+                    nameof(parameters));
+            }
+
+            builder.Append($"let {prompt.Name} = {GetPromptLiteral(table, parameters, clickedRow, prompt)};\n");
+        }
+
+        return builder.ToString();
+    }
+
+    private static string GetPromptLiteral(
+        SessionTable table,
+        CreateResultSessionEnrichmentParams parameters,
+        DataRow clickedRow,
+        ResultSessionEnrichmentPrompt prompt)
+    {
+        if (prompt.ColumnIndex.HasValue)
+        {
+            ValidateColumnIndexes(table, [prompt.ColumnIndex.Value]);
+            var column = table.Data.Columns[prompt.ColumnIndex.Value];
+            return KustoGenerator.GetLiteral(clickedRow[prompt.ColumnIndex.Value], column.DataType);
+        }
+
+        var text = prompt.Text?.Trim();
+        if (string.IsNullOrEmpty(text))
+        {
+            throw new ArgumentException(
+                $"Prompt '{prompt.Name}' has no value.",
+                nameof(parameters));
+        }
+
+        return string.Equals(prompt.Type, "string", StringComparison.OrdinalIgnoreCase)
+            ? KustoGenerator.GetStringLiteral(text)
+            : text;
+    }
+
+    private static bool IsValidEnrichmentName(string name)
+        => !string.IsNullOrEmpty(name)
+            && (char.IsLetter(name[0]) || name[0] == '_')
+            && name.All(character => char.IsLetterOrDigit(character) || character == '_');
+
     public Task<DisposeResultSessionResult> DisposeAsync(
         DisposeResultSessionParams parameters)
     {
@@ -964,6 +1096,30 @@ public sealed class ResultSessionManager : IResultSessionManager
     {
         const string comment =
             "// Exact snapshot of retained query results; this does not rerun against server data.\n";
+        return GenerateDataTable(
+            table,
+            projectionMap,
+            columnIndexes,
+            comment,
+            "\n];\nLocalResult",
+            budget,
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Builds <c>let LocalResult = datatable (...) [ ... ]</c> from retained rows, stopping as soon
+    /// as the generated text is known to exceed the budget. The caller supplies the leading comment
+    /// and everything that follows the closing bracket.
+    /// </summary>
+    private static SnapshotGenerationResult GenerateDataTable(
+        SessionTable table,
+        ProjectionMap projectionMap,
+        ImmutableList<int> columnIndexes,
+        string comment,
+        string suffix,
+        int budget,
+        CancellationToken cancellationToken)
+    {
         var schema = string.Join(
             ", ",
             columnIndexes.Select(index =>
@@ -972,7 +1128,6 @@ public sealed class ResultSessionManager : IResultSessionManager
                 return $"{KustoGenerator.GetIdentifier(column.ColumnName)}: {KustoGenerator.GetKustoType(column.DataType)}";
             }));
         var prefix = $"{comment}let LocalResult = datatable ({schema}) [\n";
-        const string suffix = "\n];\nLocalResult";
         long textBytes = Encoding.UTF8.GetByteCount(prefix)
             + Encoding.UTF8.GetByteCount(suffix);
         if (textBytes > budget)

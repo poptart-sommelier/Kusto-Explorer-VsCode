@@ -139,6 +139,48 @@ translations fail with a clear explanation.
 
 ---
 
+## Phase 6: User-provided KQL enrichments
+
+Implemented September 1, 2026. This replaced an earlier Phase 6 concept that generated built-in
+include/exclude/summarize/join queries; that concept was abandoned rather than deferred.
+
+Delivered:
+
+- A `msKustoExplorer.notebook.enrichmentFolder` setting and a folder picker that writes it.
+- Recursive discovery of `.kql` snippets, grouped by folder path relative to the library root.
+- A snippet metadata header of `// @name`, `// @description`, and `// @prompt name:type label`
+  comment directives, so a snippet stays a valid `.kql` file.
+- A right-click request from the result grid carrying the selection and clicked-cell context.
+- A searchable VS Code picker grouped by folder, with prompt collection either by typed entry or
+  from a column of the clicked row.
+- A server RPC that generates the whole cell from retained rows.
+- Generated cells inserted below the source cell with `enrichment` continuation metadata recording
+  the snippet id.
+
+Met exit criteria:
+
+- Right-clicking a result value exposes every discovered snippet under its containing folder.
+- The generated `datatable()` contains all columns for each selected or right-clicked row exactly
+  once.
+- The snippet can read the clicked column and value, the selected column names, and declared prompt
+  values through generated scalar variables.
+- Generated KQL is visible and editable in the next cell and runs using the active Kusto connection.
+- Oversized enrichments fail with a size error naming the budget, and malformed headers are reported
+  rather than silently ignored.
+
+Behavior: the enrichment input is the union of the selected rows and the right-clicked row, each
+included once with all result columns. The generated cell declares `LocalResult`, `ClickedColumn`,
+`ClickedValue`, and `SelectedColumns`, followed by prompt `let` statements and the snippet body. Those
+four names are reserved, and a snippet declaring a prompt that shadows one is rejected before
+insertion. Rows never cross into TypeScript: the C# server owns projection, escaping, and the whole
+generated query, including its UTF-8 budget check.
+
+Known limitation carried forward: the library is re-scanned when the picker opens rather than watched,
+and prompt values entered manually for non-string types are emitted verbatim as KQL expressions, which
+is safe because the generated cell is reviewed by the user and never executed automatically.
+
+---
+
 ## Result-grid usability
 
 Implemented (`3dbf092`).

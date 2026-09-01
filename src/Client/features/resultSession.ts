@@ -15,6 +15,7 @@ export const RESULT_SESSION_METHODS = {
     page: 'kusto/getResultSessionPage',
     projection: 'kusto/getResultSessionProjection',
     continuation: 'kusto/createResultSessionContinuation',
+    enrichment: 'kusto/createResultSessionEnrichment',
     dispose: 'kusto/disposeResultSession',
 } as const;
 
@@ -213,6 +214,39 @@ export interface CreateResultSessionContinuationResult {
     liveRerunQuery?: string;
     liveRerunTextBytes?: number;
     liveRerunUnavailableReason?: string;
+}
+
+export interface CreateResultSessionEnrichmentParams {
+    sessionId: string;
+    tableId: string;
+    viewRevision: number;
+    /** Ordered, non-overlapping view row ranges covering the enrichment input rows. */
+    rowRanges: ResultSessionRowRange[];
+    columnIndexes: number[];
+    /** View index of the right-clicked row. */
+    clickedRowIndex: number;
+    clickedColumnIndex: number;
+    selectedColumnIndexes: number[];
+    prompts: ResultSessionEnrichmentPrompt[];
+    snippet: string;
+}
+
+export interface ResultSessionEnrichmentPrompt {
+    name: string;
+    /** Declared Kusto scalar type. Only `string` values are quoted and escaped. */
+    type?: string;
+    /** Manually entered value. Ignored when `columnIndex` is set. */
+    text?: string;
+    /** Binds the prompt to the right-clicked row's value in this column. */
+    columnIndex?: number;
+}
+
+export interface CreateResultSessionEnrichmentResult {
+    /** Generated cell text, or undefined when it does not fit the query-text budget. */
+    query?: string;
+    queryTextBytes: number;
+    queryTextBudgetBytes: number;
+    projectedRows: number;
 }
 
 export interface DisposeResultSessionParams {

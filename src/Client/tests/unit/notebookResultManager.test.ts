@@ -4,6 +4,7 @@
 import * as vscode from 'vscode';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { IClipboard } from '../../features/clipboard';
+import type { IEnrichmentLibrary } from '../../features/enrichmentLibrary';
 import type { KustoNotebookManager } from '../../features/kustoNotebookManager';
 import {
     KUSTO_NOTEBOOK_RESULT_MIME,
@@ -535,6 +536,175 @@ describe('NotebookResultManager', () => {
             sessionId: 'session-1',
         }));
     });
+    it('runs an enrichment against the selected rows and the clicked row', async () => {
+        const server = new NullServer();
+        server.getResultSessionStatus = vi.fn(async () => createStatus());
+        server.createResultSessionEnrichment = vi.fn(async () => ({
+            query: '// Enrichment\nLocalResult | count',
+            queryTextBytes: 128,
+            queryTextBudgetBytes: 61_440,
+            projectedRows: 3,
+        }));
+        server.disposeResultSession = vi.fn(async () => ({ disposed: true }));
+        const insertContinuationCell = vi.fn(async () => undefined);
+        const pickEnrichment = vi.fn(async () => ({
+            snippet: {
+                id: 'network/dns.kql',
+                name: 'DNS lookup',
+                group: 'network',
+                prompts: [],
+                body: 'LocalResult | count',
+            },
+            prompts: [{ name: 'lookback', type: 'timespan', text: '7d' }],
+        }));
+        const manager = createManager(
+            server,
+            { insertContinuationCell },
+            { pickEnrichment } as unknown as IEnrichmentLibrary,
+        );
+        const cell = createCell();
+        const notebook = createNotebook([cell]);
+        manager.prepareSession(notebook, cell, 'session-1');
+        await manager.adoptSession(notebook, cell, 'session-1');
+        const messaging = vscodeMock().__rendererMessagings[0]!;
+        const editor = { notebook };
+
+        messaging.emitter.fire({
+            editor,
+            message: {
+                type: 'enrich',
+                requestId: 'enrich-1',
+                outputId: 'output-1',
+                sessionId: 'session-1',
+                tableId: 'table-1',
+                viewRevision: 2,
+                rowRanges: [{ offset: 4, count: 2 }, { offset: 9, count: 1 }],
+                columnIndexes: [0],
+                clickedRowIndex: 9,
+                clickedColumnIndex: 0,
+                selectedColumnIndexes: [0],
+            },
+        });
+
+        await vi.waitFor(() => expect(insertContinuationCell).toHaveBeenCalledWith(
+            editor,
+            cell,
+            '// Enrichment\nLocalResult | count',
+            'enrichment',
+            'network/dns.kql',
+        ));
+        expect(server.createResultSessionEnrichment).toHaveBeenCalledWith({
+            sessionId: 'session-1',
+            tableId: 'table-1',
+            viewRevision: 2,
+            rowRanges: [{ offset: 4, count: 2 }, { offset: 9, count: 1 }],
+            columnIndexes: [0],
+            clickedRowIndex: 9,
+            clickedColumnIndex: 0,
+            selectedColumnIndexes: [0],
+            prompts: [{ name: 'lookback', type: 'timespan', text: '7d' }],
+            snippet: 'LocalResult | count',
+        });
+        expect(pickEnrichment).toHaveBeenCalledWith(createStatus().tables[0]!.columns);
+    });
+
+    it('does not create a cell when the enrichment picker is dismissed', async () => {
+        const server = new NullServer();
+        server.getResultSessionStatus = vi.fn(async () => createStatus());
+        server.createResultSessionEnrichment = vi.fn();
+        server.disposeResultSession = vi.fn(async () => ({ disposed: true }));
+        const insertContinuationCell = vi.fn(async () => undefined);
+        const manager = createManager(
+            server,
+            { insertContinuationCell },
+            { pickEnrichment: async () => undefined },
+        );
+        const cell = createCell();
+        const notebook = createNotebook([cell]);
+        manager.prepareSession(notebook, cell, 'session-1');
+        await manager.adoptSession(notebook, cell, 'session-1');
+        const messaging = vscodeMock().__rendererMessagings[0]!;
+
+        messaging.emitter.fire({
+            editor: { notebook },
+            message: {
+                type: 'enrich',
+                requestId: 'enrich-2',
+                outputId: 'output-1',
+                sessionId: 'session-1',
+                tableId: 'table-1',
+                viewRevision: 0,
+                rowRanges: [{ offset: 0, count: 1 }],
+                columnIndexes: [0],
+                clickedRowIndex: 0,
+                clickedColumnIndex: 0,
+                selectedColumnIndexes: [0],
+            },
+        });
+
+        await vi.waitFor(() => expect(messaging.postedMessages.some(
+            posted => (posted[0] as { type?: string }).type === 'enrichmentCancelled')).toBe(true));
+        expect(server.createResultSessionEnrichment).not.toHaveBeenCalled();
+        expect(insertContinuationCell).not.toHaveBeenCalled();
+    });
+
+    it('reports an oversized enrichment instead of creating a cell', async () => {
+        const server = new NullServer();
+        server.getResultSessionStatus = vi.fn(async () => createStatus());
+        server.createResultSessionEnrichment = vi.fn(async () => ({
+            queryTextBytes: 120_000,
+            queryTextBudgetBytes: 61_440,
+            projectedRows: 5_000,
+        }));
+        server.disposeResultSession = vi.fn(async () => ({ disposed: true }));
+        const insertContinuationCell = vi.fn(async () => undefined);
+        const manager = createManager(
+            server,
+            { insertContinuationCell },
+            {
+                pickEnrichment: async () => ({
+                    snippet: {
+                        id: 'big.kql',
+                        name: 'Big',
+                        group: '',
+                        prompts: [],
+                        body: 'LocalResult',
+                    },
+                    prompts: [],
+                }),
+            },
+        );
+        const cell = createCell();
+        const notebook = createNotebook([cell]);
+        manager.prepareSession(notebook, cell, 'session-1');
+        await manager.adoptSession(notebook, cell, 'session-1');
+        const messaging = vscodeMock().__rendererMessagings[0]!;
+
+        messaging.emitter.fire({
+            editor: { notebook },
+            message: {
+                type: 'enrich',
+                requestId: 'enrich-3',
+                outputId: 'output-1',
+                sessionId: 'session-1',
+                tableId: 'table-1',
+                viewRevision: 0,
+                rowRanges: [{ offset: 0, count: 5_000 }],
+                columnIndexes: [0],
+                clickedRowIndex: 0,
+                clickedColumnIndex: 0,
+                selectedColumnIndexes: [0],
+            },
+        });
+
+        await vi.waitFor(() => {
+            const error = messaging.postedMessages
+                .map(posted => posted[0] as { type?: string; message?: string })
+                .find(posted => posted.type === 'requestError');
+            expect(error?.message).toContain('safety budget');
+        });
+        expect(insertContinuationCell).not.toHaveBeenCalled();
+    });
 });
 
 function createManager(
@@ -544,6 +714,7 @@ function createManager(
     } = {
         insertContinuationCell: vi.fn(async () => undefined),
     },
+    enrichmentLibrary: IEnrichmentLibrary = { pickEnrichment: async () => undefined },
 ): NotebookResultManager {
     const context = { subscriptions: [] } as unknown as vscode.ExtensionContext;
     const clipboard = {
@@ -554,6 +725,7 @@ function createManager(
         server,
         clipboard,
         notebookManager as unknown as KustoNotebookManager,
+        enrichmentLibrary,
     );
 }
 

@@ -31,6 +31,7 @@ public class ResultSessionContractsTests
         Assert.AreEqual("kusto/getResultSessionPage", constants[nameof(ResultSessionProtocol.PageMethod)]);
         Assert.AreEqual("kusto/getResultSessionProjection", constants[nameof(ResultSessionProtocol.ProjectionMethod)]);
         Assert.AreEqual("kusto/createResultSessionContinuation", constants[nameof(ResultSessionProtocol.ContinuationMethod)]);
+        Assert.AreEqual("kusto/createResultSessionEnrichment", constants[nameof(ResultSessionProtocol.EnrichmentMethod)]);
         Assert.AreEqual("kusto/disposeResultSession", constants[nameof(ResultSessionProtocol.DisposeMethod)]);
     }
 

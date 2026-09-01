@@ -168,10 +168,11 @@ export class KustoNotebookManager implements vscode.Disposable {
         sourceCell: vscode.NotebookCell,
         query: string,
         kind: KustoNotebookContinuationKind,
+        enrichmentId?: string,
     ): Promise<void> {
         return this.enqueue(
             editor.notebook,
-            () => this.insertContinuationCellCore(editor, sourceCell, query, kind),
+            () => this.insertContinuationCellCore(editor, sourceCell, query, kind, enrichmentId),
         );
     }
 
@@ -180,6 +181,7 @@ export class KustoNotebookManager implements vscode.Disposable {
         sourceCell: vscode.NotebookCell,
         query: string,
         kind: KustoNotebookContinuationKind,
+        enrichmentId?: string,
     ): Promise<void> {
         const cells = editor.notebook.getCells();
         const sourceIndex = cells.findIndex(cell =>
@@ -203,6 +205,7 @@ export class KustoNotebookManager implements vscode.Disposable {
             [KUSTO_NOTEBOOK_CONTINUATION_METADATA_KEY]: {
                 kind,
                 sourceCellId,
+                ...(enrichmentId ? { enrichmentId } : {}),
             },
         };
         const insertionIndex = sourceIndex + 1;

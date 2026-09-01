@@ -29,6 +29,10 @@ public interface IResultSessionManager : IDisposable
         CreateResultSessionContinuationParams parameters,
         CancellationToken cancellationToken);
 
+    Task<CreateResultSessionEnrichmentResult> CreateEnrichmentAsync(
+        CreateResultSessionEnrichmentParams parameters,
+        CancellationToken cancellationToken);
+
     Task<DisposeResultSessionResult> DisposeAsync(
         DisposeResultSessionParams parameters);
 }

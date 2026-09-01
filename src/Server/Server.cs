@@ -2120,6 +2120,14 @@ public class Server : LspServer, ILogger, ISettingSource, IStorage, IAuthenticat
         return _resultSessionManager.CreateContinuationAsync(@params, cancellationToken);
     }
 
+    [JsonRpcMethod(ResultSessionProtocol.EnrichmentMethod, UseSingleObjectParameterDeserialization = true)]
+    public Task<CreateResultSessionEnrichmentResult> OnCreateResultSessionEnrichmentAsync(
+        CreateResultSessionEnrichmentParams @params,
+        CancellationToken cancellationToken)
+    {
+        return _resultSessionManager.CreateEnrichmentAsync(@params, cancellationToken);
+    }
+
     [JsonRpcMethod(ResultSessionProtocol.DisposeMethod, UseSingleObjectParameterDeserialization = true)]
     public Task<DisposeResultSessionResult> OnDisposeResultSessionAsync(
         DisposeResultSessionParams @params)

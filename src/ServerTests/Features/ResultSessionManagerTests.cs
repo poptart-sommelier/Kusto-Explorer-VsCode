@@ -1358,6 +1358,270 @@ public class ResultSessionManagerTests
         queryGate.SetResult(Success("print Value=1", IntTable(1)));
     }
 
+    [TestMethod]
+    public async Task Enrichment_GeneratesTypedRowsContextAndSnippet()
+    {
+        using var manager = CompletedManager(DeviceTable());
+        var (sessionId, tableId) = await StartAndGetTableAsync(manager);
+
+        var result = await CreateEnrichmentAsync(
+            manager,
+            sessionId,
+            tableId,
+            Ranges((0, 2)),
+            [0, 1],
+            clickedRowIndex: 1,
+            clickedColumnIndex: 0,
+            selectedColumnIndexes: [0],
+            snippet: "LocalResult | where DeviceName == ClickedValue");
+
+        Assert.IsNotNull(result.Query);
+        Assert.AreEqual(2, result.ProjectedRows);
+        StringAssert.StartsWith(result.Query, "// Enrichment");
+        StringAssert.Contains(
+            result.Query,
+            "let LocalResult = datatable (DeviceName: string, Code: int) [");
+        StringAssert.Contains(
+            result.Query,
+            $"{KustoGenerator.GetStringLiteral("frosty")}, int(1)");
+        StringAssert.Contains(
+            result.Query,
+            $"let ClickedColumn = {KustoGenerator.GetStringLiteral("DeviceName")};");
+        StringAssert.Contains(
+            result.Query,
+            $"let ClickedValue = {KustoGenerator.GetStringLiteral("o'reilly")};");
+        StringAssert.Contains(
+            result.Query,
+            $"let SelectedColumns = dynamic([{KustoGenerator.GetStringLiteral("DeviceName")}]);");
+        StringAssert.EndsWith(result.Query, "LocalResult | where DeviceName == ClickedValue");
+        Assert.AreEqual(
+            Encoding.UTF8.GetByteCount(result.Query),
+            result.QueryTextBytes);
+    }
+
+    [TestMethod]
+    public async Task Enrichment_IncludesEveryRequestedRowRange()
+    {
+        using var manager = CompletedManager(DeviceTable());
+        var (sessionId, tableId) = await StartAndGetTableAsync(manager);
+
+        var result = await CreateEnrichmentAsync(
+            manager,
+            sessionId,
+            tableId,
+            Ranges((0, 1), (2, 1)),
+            [0, 1]);
+
+        Assert.IsNotNull(result.Query);
+        Assert.AreEqual(2, result.ProjectedRows);
+        StringAssert.Contains(
+            result.Query,
+            $"{KustoGenerator.GetStringLiteral("frosty")}, int(1)");
+        StringAssert.Contains(
+            result.Query,
+            $"{KustoGenerator.GetStringLiteral("third")}, int(3)");
+        Assert.IsFalse(result.Query.Contains("o'reilly", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
+    public async Task Enrichment_BindsPromptsManuallyAndFromClickedRow()
+    {
+        using var manager = CompletedManager(DeviceTable());
+        var (sessionId, tableId) = await StartAndGetTableAsync(manager);
+
+        var result = await CreateEnrichmentAsync(
+            manager,
+            sessionId,
+            tableId,
+            Ranges((0, 1)),
+            [0, 1],
+            clickedRowIndex: 1,
+            prompts:
+            [
+                new ResultSessionEnrichmentPrompt
+                {
+                    Name = "lookback",
+                    Type = "timespan",
+                    Text = "7d"
+                },
+                new ResultSessionEnrichmentPrompt
+                {
+                    Name = "label",
+                    Type = "string",
+                    Text = "o'reilly"
+                },
+                new ResultSessionEnrichmentPrompt
+                {
+                    Name = "boundCode",
+                    ColumnIndex = 1
+                }
+            ]);
+
+        Assert.IsNotNull(result.Query);
+        StringAssert.Contains(result.Query, "let lookback = 7d;");
+        StringAssert.Contains(
+            result.Query,
+            $"let label = {KustoGenerator.GetStringLiteral("o'reilly")};");
+        StringAssert.Contains(result.Query, "let boundCode = int(2);");
+    }
+
+    [TestMethod]
+    public async Task Enrichment_RejectsUnsafePromptsAndMissingValues()
+    {
+        using var manager = CompletedManager(DeviceTable());
+        var (sessionId, tableId) = await StartAndGetTableAsync(manager);
+
+        async Task<ArgumentException> FailsWithAsync(ResultSessionEnrichmentPrompt prompt)
+        {
+            return await Assert.ThrowsExactlyAsync<ArgumentException>(() =>
+                CreateEnrichmentAsync(
+                    manager,
+                    sessionId,
+                    tableId,
+                    Ranges((0, 1)),
+                    [0, 1],
+                    prompts: [prompt]));
+        }
+
+        StringAssert.Contains(
+            (await FailsWithAsync(new ResultSessionEnrichmentPrompt
+            {
+                Name = "ClickedValue",
+                Type = "string",
+                Text = "x"
+            })).Message,
+            "reserved");
+        StringAssert.Contains(
+            (await FailsWithAsync(new ResultSessionEnrichmentPrompt
+            {
+                Name = "bad name",
+                Type = "string",
+                Text = "x"
+            })).Message,
+            "Invalid prompt name");
+        StringAssert.Contains(
+            (await FailsWithAsync(new ResultSessionEnrichmentPrompt
+            {
+                Name = "empty",
+                Type = "string",
+                Text = "   "
+            })).Message,
+            "no value");
+    }
+
+    [TestMethod]
+    public async Task Enrichment_RejectsDuplicatePromptNames()
+    {
+        using var manager = CompletedManager(DeviceTable());
+        var (sessionId, tableId) = await StartAndGetTableAsync(manager);
+
+        var error = await Assert.ThrowsExactlyAsync<ArgumentException>(() =>
+            CreateEnrichmentAsync(
+                manager,
+                sessionId,
+                tableId,
+                Ranges((0, 1)),
+                [0, 1],
+                prompts:
+                [
+                    new ResultSessionEnrichmentPrompt { Name = "a", Type = "int", Text = "1" },
+                    new ResultSessionEnrichmentPrompt { Name = "a", Type = "int", Text = "2" }
+                ]));
+
+        StringAssert.Contains(error.Message, "more than once");
+    }
+
+    [TestMethod]
+    public async Task Enrichment_ReturnsNoQueryWhenOverBudget()
+    {
+        using var manager = CompletedManager(LargeTextTable());
+        var (sessionId, tableId) = await StartAndGetTableAsync(
+            manager,
+            NewStart(cluster: "https://ade.loganalytics.io/subscriptions/x/resource"));
+
+        var result = await CreateEnrichmentAsync(
+            manager,
+            sessionId,
+            tableId,
+            Ranges((0, 1_000)),
+            [0]);
+
+        Assert.IsNull(result.Query);
+        Assert.IsTrue(result.QueryTextBytes > result.QueryTextBudgetBytes);
+        Assert.AreEqual(
+            ResultSessionProtocol.ScopedQueryTextBudgetBytes,
+            result.QueryTextBudgetBytes);
+    }
+
+    [TestMethod]
+    public async Task Enrichment_RejectsStaleRevisionAndOutOfRangeInput()
+    {
+        using var manager = CompletedManager(DeviceTable());
+        var (sessionId, tableId) = await StartAndGetTableAsync(manager);
+
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() =>
+            CreateEnrichmentAsync(
+                manager,
+                sessionId,
+                tableId,
+                Ranges((0, 1)),
+                [0, 1],
+                revision: 7));
+        await Assert.ThrowsExactlyAsync<ArgumentOutOfRangeException>(() =>
+            CreateEnrichmentAsync(
+                manager,
+                sessionId,
+                tableId,
+                Ranges((0, 1)),
+                [0, 1],
+                clickedRowIndex: 99));
+        await Assert.ThrowsExactlyAsync<ArgumentOutOfRangeException>(() =>
+            CreateEnrichmentAsync(
+                manager,
+                sessionId,
+                tableId,
+                Ranges((0, 1)),
+                [0, 1],
+                clickedColumnIndex: 42));
+        await Assert.ThrowsExactlyAsync<ArgumentException>(() =>
+            CreateEnrichmentAsync(
+                manager,
+                sessionId,
+                tableId,
+                Ranges((0, 1)),
+                [0, 1],
+                snippet: "  "));
+    }
+
+    [TestMethod]
+    public async Task Enrichment_UsesReadyFilteredViewPositions()
+    {
+        using var manager = CompletedManager(DeviceTable());
+        var (sessionId, tableId) = await StartAndGetTableAsync(manager);
+        await manager.SetViewAsync(new SetResultSessionViewParams
+        {
+            SessionId = sessionId,
+            TableId = tableId,
+            Revision = 1,
+            Filters = [Filter(0, "third", caseSensitive: true)],
+            Sorts = []
+        }, CancellationToken.None);
+
+        var result = await CreateEnrichmentAsync(
+            manager,
+            sessionId,
+            tableId,
+            Ranges((0, 1)),
+            [0, 1],
+            revision: 1);
+
+        Assert.IsNotNull(result.Query);
+        Assert.AreEqual(1, result.ProjectedRows);
+        StringAssert.Contains(
+            result.Query,
+            $"{KustoGenerator.GetStringLiteral("third")}, int(3)");
+    }
+
     private static ResultSessionManager CompletedManager(params DataTable[] tables)
     {
         return new ResultSessionManager(new StubQueryManager((query, _) =>
@@ -1471,6 +1735,58 @@ public class ResultSessionManagerTests
             RowRanges = rowRanges,
             ColumnIndexes = columnIndexes
         }, cancellationToken);
+    }
+
+    private static Task<CreateResultSessionEnrichmentResult> CreateEnrichmentAsync(
+        ResultSessionManager manager,
+        string sessionId,
+        string tableId,
+        ImmutableList<ResultSessionRowRange> rowRanges,
+        ImmutableList<int> columnIndexes,
+        long clickedRowIndex = 0,
+        int clickedColumnIndex = 0,
+        ImmutableList<int>? selectedColumnIndexes = null,
+        ImmutableList<ResultSessionEnrichmentPrompt>? prompts = null,
+        string snippet = "LocalResult | count",
+        long revision = 0,
+        CancellationToken cancellationToken = default)
+    {
+        return manager.CreateEnrichmentAsync(new CreateResultSessionEnrichmentParams
+        {
+            SessionId = sessionId,
+            TableId = tableId,
+            ViewRevision = revision,
+            RowRanges = rowRanges,
+            ColumnIndexes = columnIndexes,
+            ClickedRowIndex = clickedRowIndex,
+            ClickedColumnIndex = clickedColumnIndex,
+            SelectedColumnIndexes = selectedColumnIndexes ?? columnIndexes,
+            Prompts = prompts ?? [],
+            Snippet = snippet
+        }, cancellationToken);
+    }
+
+    private static ImmutableList<ResultSessionRowRange> Ranges(
+        params (int Offset, int Count)[] ranges)
+    {
+        return ranges
+            .Select(range => new ResultSessionRowRange
+            {
+                Offset = range.Offset,
+                Count = range.Count
+            })
+            .ToImmutableList();
+    }
+
+    private static DataTable DeviceTable()
+    {
+        var table = new DataTable("Devices");
+        table.Columns.Add("DeviceName", typeof(string));
+        table.Columns.Add("Code", typeof(int));
+        table.Rows.Add("frosty", 1);
+        table.Rows.Add("o'reilly", 2);
+        table.Rows.Add("third", 3);
+        return table;
     }
 
     private static async Task<ResultSessionStatus> WaitForTerminalAsync(

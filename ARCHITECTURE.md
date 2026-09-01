@@ -320,9 +320,9 @@ flowchart LR
 The version 1 cross-process shapes and stable method names are defined in
 `features/resultSession.ts` and `Utilities/ResultSessionContracts.cs`. They cover starting,
 cancelling, status/progress, applying a view, reading a page, reading a bounded projection, creating
-a result continuation, and disposing a session. `ResultSessionManager` owns the server snapshot,
-revisioned sort views, paging, bounded projections, continuation generation, cancellation, and
-cleanup. Regex filters use the same revisioned view contract:
+a result continuation, creating an enrichment, and disposing a session. `ResultSessionManager` owns
+the server snapshot, revisioned sort views, paging, bounded projections, continuation and enrichment
+generation, cancellation, and cleanup. Regex filters use the same revisioned view contract:
 filters on different columns combine with `AND`, evaluate against invariant display text, and use a
 4,096-character pattern limit, a 100 ms per-match timeout, and a five-second total evaluation limit.
 Null values match as an empty string. Invalid, timed-out, cancelled, or superseded evaluations cannot
@@ -436,6 +436,52 @@ Existing `.kql` files continue to use the current editor and result viewer, and 
 continue to preserve saved result snapshots. Notebook support is additive and requires no conversion.
 Existing result-table behavior is reused where practical, but the `simple-datatables` webview is not
 the foundation for the 100,000-row notebook grid.
+
+#### User-provided KQL enrichments
+
+`msKustoExplorer.notebook.enrichmentFolder` points at a folder of `.kql` snippets. Right-clicking a
+result value runs one of them against the selected rows.
+
+The feature keeps the repository's data-model/UI split:
+
+- `features/enrichmentCatalog.ts` is the testable data model. It recursively discovers snippets to a
+  depth of five folders, skipping dot-prefixed folders, and parses the header. It touches the file
+  system only through an `EnrichmentFileSystem` interface, so tests need no workspace.
+- `features/enrichmentLibrary.ts` is the VS Code half behind `IEnrichmentLibrary`: the workspace-file
+  adapter, the grouped picker, prompt collection, and the empty/unconfigured states.
+
+A snippet stays a valid `.kql` file. Its header is a run of `// @name`, `// @description`, and
+`// @prompt <name>:<kustoType> <label>` comment directives; only directive lines are stripped, so an
+ordinary leading comment survives into the generated cell, and unknown directives are ignored so a
+newer snippet still runs on an older extension. A snippet whose header is invalid is listed with its
+error and cannot be run.
+
+The renderer sends only the ready view revision, the row ranges, the requested columns, the clicked
+row and column, and the selected columns. Input rows are the union of the current selection and the
+clicked row, each included once with every result column. `kusto/createResultSessionEnrichment`
+generates the entire cell inside the C# process from the retained table, so enrichment rows never
+cross into TypeScript:
+
+```kusto
+let LocalResult = datatable (...) [ ... ];
+let ClickedColumn = 'DeviceName';
+let ClickedValue = 'frosty';
+let SelectedColumns = dynamic(['DeviceName']);
+let lookback = 7d;
+<snippet body>
+```
+
+`LocalResult`, `ClickedColumn`, `ClickedValue`, and `SelectedColumns` are reserved. The server rejects
+a prompt that shadows one, that repeats another prompt's name, that is not a valid identifier, or that
+has no value. A prompt bound to a column is formatted from the clicked row with that column's real
+Kusto type; a manually entered value is escaped only when the snippet declared it as a `string`, so
+other types can carry expressions such as `7d` or `ago(1h)`. This is acceptable because the generated
+cell is inserted for review and never executed automatically.
+
+Enrichment reuses the same UTF-8 query-text budget as snapshot continuation, measured over the whole
+generated cell including the declarations and snippet. An over-budget enrichment returns no query and
+the extension reports the required and permitted sizes rather than silently narrowing the data.
+Generated cells carry `enrichment` continuation metadata naming the source cell and snippet id.
 
 ---
 

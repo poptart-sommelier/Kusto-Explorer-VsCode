@@ -21,6 +21,7 @@ public static class ResultSessionProtocol
     public const string PageMethod = "kusto/getResultSessionPage";
     public const string ProjectionMethod = "kusto/getResultSessionProjection";
     public const string ContinuationMethod = "kusto/createResultSessionContinuation";
+    public const string EnrichmentMethod = "kusto/createResultSessionEnrichment";
     public const string DisposeMethod = "kusto/disposeResultSession";
 }
 
@@ -52,6 +53,16 @@ public static class ResultSessionContractValues
     public const string ContinuationSource = "source";
     public const string ContinuationExactSnapshot = "exactSnapshot";
     public const string ContinuationLiveRerun = "liveRerun";
+    public const string ContinuationEnrichment = "enrichment";
+
+    /// <summary>Names the generated enrichment cell defines. A prompt may not reuse one.</summary>
+    public static readonly ImmutableArray<string> EnrichmentReservedNames =
+    [
+        "LocalResult",
+        "ClickedColumn",
+        "ClickedValue",
+        "SelectedColumns"
+    ];
 }
 
 [DataContract]
@@ -489,6 +500,79 @@ public sealed class CreateResultSessionContinuationResult
 
     [DataMember(Name = "liveRerunUnavailableReason")]
     public string? LiveRerunUnavailableReason { get; init; }
+}
+
+[DataContract]
+public sealed class CreateResultSessionEnrichmentParams
+{
+    [DataMember(Name = "sessionId")]
+    public required string SessionId { get; init; }
+
+    [DataMember(Name = "tableId")]
+    public required string TableId { get; init; }
+
+    [DataMember(Name = "viewRevision")]
+    public required long ViewRevision { get; init; }
+
+    /// <summary>Ordered, non-overlapping view row ranges covering the enrichment input rows.</summary>
+    [DataMember(Name = "rowRanges")]
+    public required ImmutableList<ResultSessionRowRange> RowRanges { get; init; }
+
+    [DataMember(Name = "columnIndexes")]
+    public required ImmutableList<int> ColumnIndexes { get; init; }
+
+    /// <summary>View index of the right-clicked row, used for context and column-bound prompts.</summary>
+    [DataMember(Name = "clickedRowIndex")]
+    public required long ClickedRowIndex { get; init; }
+
+    [DataMember(Name = "clickedColumnIndex")]
+    public required int ClickedColumnIndex { get; init; }
+
+    [DataMember(Name = "selectedColumnIndexes")]
+    public required ImmutableList<int> SelectedColumnIndexes { get; init; }
+
+    [DataMember(Name = "prompts")]
+    public required ImmutableList<ResultSessionEnrichmentPrompt> Prompts { get; init; }
+
+    /// <summary>Snippet KQL, appended verbatim after the generated declarations.</summary>
+    [DataMember(Name = "snippet")]
+    public required string Snippet { get; init; }
+}
+
+[DataContract]
+public sealed class ResultSessionEnrichmentPrompt
+{
+    [DataMember(Name = "name")]
+    public required string Name { get; init; }
+
+    /// <summary>Declared Kusto scalar type. Only <c>string</c> values are quoted and escaped.</summary>
+    [DataMember(Name = "type")]
+    public string? Type { get; init; }
+
+    /// <summary>Manually entered value. Ignored when <see cref="ColumnIndex"/> is set.</summary>
+    [DataMember(Name = "text")]
+    public string? Text { get; init; }
+
+    /// <summary>Binds the prompt to the right-clicked row's value in this column.</summary>
+    [DataMember(Name = "columnIndex")]
+    public int? ColumnIndex { get; init; }
+}
+
+[DataContract]
+public sealed class CreateResultSessionEnrichmentResult
+{
+    /// <summary>Generated cell text, or null when it does not fit the query-text budget.</summary>
+    [DataMember(Name = "query")]
+    public string? Query { get; init; }
+
+    [DataMember(Name = "queryTextBytes")]
+    public required long QueryTextBytes { get; init; }
+
+    [DataMember(Name = "queryTextBudgetBytes")]
+    public required int QueryTextBudgetBytes { get; init; }
+
+    [DataMember(Name = "projectedRows")]
+    public required long ProjectedRows { get; init; }
 }
 
 [DataContract]

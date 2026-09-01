@@ -3,6 +3,7 @@
 
 import * as vscode from 'vscode';
 import type { IClipboard } from './clipboard';
+import { EnrichmentLibrary, type IEnrichmentLibrary } from './enrichmentLibrary';
 import type { KustoNotebookManager } from './kustoNotebookManager';
 import {
     RESULT_SESSION_MAX_PAGE_SIZE,
@@ -32,7 +33,7 @@ interface ActiveResultSession {
 }
 
 interface RendererRequest {
-    type: 'page' | 'setView' | 'cancelView' | 'copy' | 'continue';
+    type: 'page' | 'setView' | 'cancelView' | 'copy' | 'continue' | 'enrich';
     requestId: string;
     outputId: string;
     sessionId: string;
@@ -70,6 +71,15 @@ interface ContinueRequest extends RendererRequest {
     columnIndexes: number[];
 }
 
+interface EnrichRequest extends RendererRequest {
+    type: 'enrich';
+    rowRanges: ResultSessionRowRange[];
+    columnIndexes: number[];
+    clickedRowIndex: number;
+    clickedColumnIndex: number;
+    selectedColumnIndexes: number[];
+}
+
 export class NotebookResultManager implements vscode.Disposable {
     private readonly messaging: vscode.NotebookRendererMessaging;
     private readonly disposables: vscode.Disposable[];
@@ -84,6 +94,7 @@ export class NotebookResultManager implements vscode.Disposable {
         private readonly server: IServer,
         private readonly clipboard: IClipboard,
         private readonly notebookManager: KustoNotebookManager,
+        private readonly enrichmentLibrary: IEnrichmentLibrary = new EnrichmentLibrary(),
     ) {
         this.messaging = vscode.notebooks.createRendererMessaging(KUSTO_NOTEBOOK_RESULT_RENDERER_ID);
         this.disposables = [
@@ -404,6 +415,11 @@ export class NotebookResultManager implements vscode.Disposable {
             } else if (request.type === 'copy') {
                 const copiedRows = await this.copyProjection(request);
                 await this.reply(event.editor, request, { type: 'copyResult', copiedRows });
+            } else if (request.type === 'enrich') {
+                const enriched = await this.enrichInNewCell(event.editor, request);
+                await this.reply(event.editor, request, enriched
+                    ? { type: 'enrichmentResult', name: enriched }
+                    : { type: 'enrichmentCancelled' });
             } else {
                 const kind = await this.continueInNewCell(event.editor, request);
                 await this.reply(event.editor, request, kind
@@ -455,7 +471,8 @@ export class NotebookResultManager implements vscode.Disposable {
             }
             if (request.type === 'page'
                 || request.type === 'copy'
-                || request.type === 'continue') {
+                || request.type === 'continue'
+                || request.type === 'enrich') {
                 try {
                     status = await this.server.getResultSessionStatus({
                         sessionId: request.sessionId,
@@ -648,6 +665,65 @@ export class NotebookResultManager implements vscode.Disposable {
         return 'liveRerun';
     }
 
+    private async enrichInNewCell(
+        editor: vscode.NotebookEditor,
+        request: EnrichRequest,
+    ): Promise<string | undefined> {
+        const sourceCell = this.findSourceCell(editor.notebook, request.sessionId);
+        const status = await this.server.getResultSessionStatus({ sessionId: request.sessionId });
+        const table = status.tables.find(candidate => candidate.id === request.tableId);
+        if (!table) {
+            throw new Error('The result table for this enrichment no longer exists.');
+        }
+
+        const selection = await this.enrichmentLibrary.pickEnrichment(table.columns);
+        if (!selection) {
+            return undefined;
+        }
+
+        const result = await this.server.createResultSessionEnrichment({
+            sessionId: request.sessionId,
+            tableId: request.tableId,
+            viewRevision: request.viewRevision,
+            rowRanges: request.rowRanges,
+            columnIndexes: request.columnIndexes,
+            clickedRowIndex: request.clickedRowIndex,
+            clickedColumnIndex: request.clickedColumnIndex,
+            selectedColumnIndexes: request.selectedColumnIndexes,
+            prompts: selection.prompts,
+            snippet: selection.snippet.body,
+        });
+
+        if (!result.query) {
+            throw new Error(
+                `The selected rows need ${formatBytes(result.queryTextBytes)} of query text, which exceeds this service's ${formatBytes(result.queryTextBudgetBytes)} safety budget. Select fewer rows and run the enrichment again.`);
+        }
+
+        if (result.projectedRows >= LARGE_SNAPSHOT_WARNING_ROWS
+            || result.queryTextBytes >= LARGE_SNAPSHOT_WARNING_BYTES) {
+            const choice = await vscode.window.showWarningMessage(
+                `'${selection.snippet.name}' will embed ${result.projectedRows.toLocaleString()} rows (${formatBytes(result.queryTextBytes)}) in the notebook. Create the cell?`,
+                {
+                    modal: true,
+                    detail: 'Embedded values are saved in the notebook and may appear in service query logs when the generated cell is run.',
+                },
+                'Create enrichment cell',
+            );
+            if (choice !== 'Create enrichment cell') {
+                return undefined;
+            }
+        }
+
+        await this.notebookManager.insertContinuationCell(
+            editor,
+            sourceCell,
+            result.query,
+            'enrichment',
+            selection.snippet.id,
+        );
+        return selection.snippet.name;
+    }
+
     private findSourceCell(
         notebook: vscode.NotebookDocument,
         sessionId: string,
@@ -683,7 +759,7 @@ export class NotebookResultManager implements vscode.Disposable {
 
 function parseRendererRequest(
     value: unknown,
-): PageRequest | ViewRequest | CancelViewRequest | CopyRequest | ContinueRequest | undefined {
+): PageRequest | ViewRequest | CancelViewRequest | CopyRequest | ContinueRequest | EnrichRequest | undefined {
     if (!isRecord(value)
         || typeof value.requestId !== 'string'
         || typeof value.outputId !== 'string'
@@ -750,6 +826,28 @@ function parseRendererRequest(
             scope: value.scope,
             ...(value.rowRanges ? { rowRanges: value.rowRanges } : {}),
             columnIndexes: value.columnIndexes,
+        };
+    }
+
+    if (value.type === 'enrich'
+        && Array.isArray(value.rowRanges)
+        && value.rowRanges.length > 0
+        && value.rowRanges.every(isRowRange)
+        && Array.isArray(value.columnIndexes)
+        && value.columnIndexes.length > 0
+        && value.columnIndexes.every(isNonNegativeInteger)
+        && isNonNegativeInteger(value.clickedRowIndex)
+        && isNonNegativeInteger(value.clickedColumnIndex)
+        && Array.isArray(value.selectedColumnIndexes)
+        && value.selectedColumnIndexes.every(isNonNegativeInteger)) {
+        return {
+            ...common,
+            type: 'enrich',
+            rowRanges: value.rowRanges,
+            columnIndexes: value.columnIndexes,
+            clickedRowIndex: value.clickedRowIndex,
+            clickedColumnIndex: value.clickedColumnIndex,
+            selectedColumnIndexes: value.selectedColumnIndexes,
         };
     }
 

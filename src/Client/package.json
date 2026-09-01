@@ -1107,6 +1107,16 @@
         }
       },
       {
+        "title": "Notebooks",
+        "properties": {
+          "msKustoExplorer.notebook.enrichmentFolder": {
+            "type": "string",
+            "default": "",
+            "description": "Folder containing .kql enrichment snippets offered when right-clicking a notebook result value. Subfolders group the snippets."
+          }
+        }
+      },
+      {
         "title": "Connections",
         "properties": {
           "msKustoExplorer.defaultDomain": {

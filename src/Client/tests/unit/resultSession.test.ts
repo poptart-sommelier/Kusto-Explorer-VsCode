@@ -26,6 +26,7 @@ describe('Result session protocol', () => {
             page: 'kusto/getResultSessionPage',
             projection: 'kusto/getResultSessionProjection',
             continuation: 'kusto/createResultSessionContinuation',
+            enrichment: 'kusto/createResultSessionEnrichment',
             dispose: 'kusto/disposeResultSession',
         });
     });

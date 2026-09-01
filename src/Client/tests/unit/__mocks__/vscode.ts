@@ -48,6 +48,10 @@ export const workspace = {
     }),
     notebookDocuments: [],
     workspaceFolders: [],
+    fs: {
+        readDirectory: async (_uri: unknown): Promise<Array<[string, number]>> => [],
+        readFile: async (_uri: unknown): Promise<Uint8Array> => new Uint8Array(),
+    },
 };
 
 export const window = {
@@ -73,6 +77,10 @@ export const commands = {
 export const Uri = {
     parse: (value: string) => ({ toString: () => value, fsPath: value, scheme: 'file' }),
     file: (path: string) => ({ toString: () => path, fsPath: path, scheme: 'file' }),
+    joinPath: (base: { fsPath: string }, ...segments: string[]) => {
+        const path = [base.fsPath, ...segments].join('/');
+        return { toString: () => path, fsPath: path, scheme: 'file' };
+    },
 };
 
 export enum TreeItemCollapsibleState {
