@@ -183,10 +183,18 @@ export class KustoNotebookController implements vscode.Disposable {
                 await this.connections.ensureServer(serverConnection);
             }
             let effectiveConnection = connection;
-            if (result.provenance?.cluster || result.provenance?.database) {
-                const cluster = result.provenance.cluster ?? connection.cluster;
-                const database = result.provenance.database
-                    ?? (result.provenance.cluster ? undefined : connection.database);
+            // Provenance echoes the requested connection back when the query did not
+            // redirect, so adopting it unconditionally would rewrite the notebook's
+            // saved connection after every run. Only follow a genuine redirect, and
+            // never drop a field the notebook already has.
+            const provenanceCluster = result.provenance?.cluster;
+            const provenanceDatabase = result.provenance?.database;
+            const redirected = (provenanceCluster !== undefined && provenanceCluster !== connection.cluster)
+                || (provenanceDatabase !== undefined && provenanceDatabase !== connection.database);
+            if (redirected) {
+                const cluster = provenanceCluster ?? connection.cluster;
+                const database = provenanceDatabase
+                    ?? (cluster === connection.cluster ? connection.database : undefined);
                 const serverKind = this.connections.findServerInfo(cluster)?.serverKind;
                 effectiveConnection = {
                     cluster,

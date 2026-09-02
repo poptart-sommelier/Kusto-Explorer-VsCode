@@ -117,6 +117,57 @@ describe('KustoNotebookController', () => {
         expect(runQuery.mock.calls[1]?.[2]).toBe('OtherDatabase');
     });
 
+    it('keeps the saved connection when provenance echoes it back', async () => {
+        const manager = createNotebookManager();
+        const controller = createController(
+            createResultManager(vi.fn(async () => createStatus())),
+            createExecution(false),
+            manager,
+        );
+
+        await invokeExecuteHandler(controller, createCell('print 1'), createNotebook());
+
+        expect(manager.setConnection).not.toHaveBeenCalled();
+    });
+
+    it('keeps the saved database when provenance omits it', async () => {
+        const manager = createNotebookManager();
+        const runQuery = vi.fn()
+            .mockResolvedValueOnce(createStatus({ omitDatabase: true, tables: [] }))
+            .mockResolvedValueOnce(createStatus());
+        const controller = createController(
+            createResultManager(runQuery),
+            [createExecution(false), createExecution(false)],
+            manager,
+        );
+
+        await invokeExecuteHandler(
+            controller,
+            [createCell('print 1'), createCell('print 2')],
+            createNotebook(),
+        );
+
+        expect(manager.setConnection).not.toHaveBeenCalled();
+        expect(runQuery.mock.calls[1]?.[2]).toBe('Samples');
+    });
+
+    it('adopts the connection when the query redirects to another cluster', async () => {
+        const manager = createNotebookManager();
+        const controller = createController(
+            createResultManager(vi.fn(async () =>
+                createStatus({ cluster: 'other.kusto.windows.net', database: 'Other' }))),
+            createExecution(false),
+            manager,
+        );
+
+        await invokeExecuteHandler(controller, createCell('print 1'), createNotebook());
+
+        expect(manager.setConnection).toHaveBeenCalledWith(
+            expect.anything(),
+            { cluster: 'other.kusto.windows.net', database: 'Other' },
+        );
+    });
+
     it('serializes separate execution gestures for the same notebook', async () => {
         let releaseFirst!: (value: ResultSessionStatus) => void;
         const firstResult = new Promise<ResultSessionStatus>(resolve => {
@@ -178,6 +229,7 @@ describe('KustoNotebookController', () => {
 function createController(
     resultManager: NotebookResultManager,
     execution: MockExecution | MockExecution[],
+    manager: KustoNotebookManager = createNotebookManager(),
 ): Record<string, unknown> {
     const connections = {
         ensureServer: vi.fn(async () => undefined),
@@ -185,14 +237,6 @@ function createController(
         getServersAndGroups: vi.fn(() => ({ items: [] })),
         getDatabasesForCluster: vi.fn(async () => []),
     } as unknown as ConnectionManager;
-    const manager = {
-        getConnection: vi.fn(() => ({
-            cluster: 'help.kusto.windows.net',
-            database: 'Samples',
-        })),
-        synchronizeConnection: vi.fn(async () => undefined),
-        setConnection: vi.fn(async () => undefined),
-    } as unknown as KustoNotebookManager;
     new KustoNotebookController(connections, manager, resultManager);
 
     const controllers = (vscode as unknown as {
@@ -202,6 +246,17 @@ function createController(
     const executions = Array.isArray(execution) ? [...execution] : [execution];
     controller.createNotebookCellExecution = () => executions.shift()!;
     return controller;
+}
+
+function createNotebookManager(): KustoNotebookManager {
+    return {
+        getConnection: vi.fn(() => ({
+            cluster: 'help.kusto.windows.net',
+            database: 'Samples',
+        })),
+        synchronizeConnection: vi.fn(async () => undefined),
+        setConnection: vi.fn(async () => undefined),
+    } as unknown as KustoNotebookManager;
 }
 
 function createResultManager(
@@ -224,7 +279,12 @@ function createResultManager(
 }
 
 function createStatus(
-    options: { database?: string; tables?: ResultSessionStatus['tables'] } = {},
+    options: {
+        cluster?: string;
+        database?: string;
+        omitDatabase?: boolean;
+        tables?: ResultSessionStatus['tables'];
+    } = {},
 ): ResultSessionStatus {
     return {
         protocolVersion: 1,
@@ -241,8 +301,8 @@ function createStatus(
         }],
         provenance: {
             query: 'print Value = 1',
-            cluster: 'help.kusto.windows.net',
-            database: options.database ?? 'Samples',
+            cluster: options.cluster ?? 'help.kusto.windows.net',
+            ...(options.omitDatabase ? {} : { database: options.database ?? 'Samples' }),
             executionStartedAt: new Date(0).toISOString(),
         },
     };

@@ -185,7 +185,10 @@ public class QueryManager : IQueryManager
                 new RunResult
                 {
                     Query = query,
-                    Error = CreateDiagnostic(query, "The query cannot be run. There is no server connection.")
+                    Error = CreateDiagnostic(
+                        query,
+                        "The query cannot be run. This document is not connected to a cluster. "
+                            + "Choose a connection before running the query.")
                 });
         }
 
@@ -195,7 +198,10 @@ public class QueryManager : IQueryManager
                 new RunResult
                 {
                     Query = query,
-                    Error = CreateDiagnostic(query, "The query cannot be run. The server connection is invalid.")
+                    Error = CreateDiagnostic(
+                        query,
+                        $"The query cannot be run. '{effectiveCluster}' is not a configured connection. "
+                            + "Add it in the Kusto Connections view, or point this document at a connection that is.")
                 });
         }
 
