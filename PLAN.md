@@ -17,16 +17,99 @@ while it is built and evaluated.
 
 ## Remaining goals
 
-1. Harden the notebook experience against real clusters, large results, and failure cases.
-2. As a stretch goal, allow Python cells to analyze KQL results as pandas DataFrames.
+1. Agree the scope of the user-facing features in the [feature design queue](#feature-design-queue).
+2. Harden the notebook experience against real clusters, large results, and failure cases.
+3. As a stretch goal, allow Python cells to analyze KQL results as pandas DataFrames.
 
 Goals that are already met are listed in [PLAN.DONE.md](PLAN.DONE.md).
 
 ---
 
+## Feature design queue
+
+These proposals are recorded for future discussion, not approved for implementation. Start with
+detailed requirements discussions for the row/JSON inspector and enrichment authoring workbench
+when the user asks to resume. Feature scope, implementation order, and exit criteria are not yet
+agreed.
+
+### Row and JSON inspector
+
+**Status: high-priority design discussion pending; not started.**
+
+Explore a focused way to inspect result rows, long strings, and nested `dynamic`/JSON values. The
+user wants detailed questioning before deciding the feature's behavior.
+
+Open questions for that discussion:
+
+- Which result surfaces and inspection, navigation, search, and copying actions should it support?
+- How should large values, nested structures, types, and nulls be presented?
+
+### Enrichment authoring workbench
+
+**Status: high-priority design discussion pending; not started.**
+
+Explore creating and modifying reusable `.kql` enrichments within VS Code. Creation, editing,
+duplication, input-schema hints, prompt options, and generated-query previews are candidates, not
+agreed deliverables. The user wants a detailed requirements discussion before scope is chosen.
+
+Open questions for that discussion:
+
+- What should the create, edit, preview, and test workflow look like?
+- Which prompt, validation, and library-management capabilities are needed in the first version?
+
+### Parameterised investigation notebooks
+
+**Status: further design discussion pending; not started.**
+
+Explore reusable investigations with named inputs such as an entity and time window. The idea is
+of interest, but its scope and execution model need to be fleshed out with the user.
+
+Open questions:
+
+- How should inputs be declared, supplied, and shared between cells?
+- Which values should be saved, and how should input changes affect execution and replay?
+
+### Time-range query sharding
+
+**Status: detailed design discussion pending; not started.**
+
+Explore an explicit, user-requested way to split a large or timing-out query's time range into
+smaller chunks, execute them, and recombine their outputs into one logical result. This is a
+proposal to discuss, not an assumption that arbitrary queries can be split and recombined safely.
+
+Open questions:
+
+- Which queries and time columns can be partitioned, and what should recombination mean for
+  aggregations, joins, ordering, and duplicate rows?
+- How should chunk sizes, concurrency, progress, retries, and cancellation work?
+- How should results larger than memory, failed chunks, and incomplete results be handled?
+
+### Notebook charts and multiple chart views
+
+**Status: low priority; deferred until later; not started.**
+
+Keep inline notebook charts and multiple named chart views per result as future feature candidates.
+
+Open question:
+
+- Which chart surfaces, interactions, and data scopes should a later first version support?
+
+### Notebook-selection-aware Copilot assistance
+
+**Status: low priority; deferred until later; not started.**
+
+Keep assistance with explaining selected results, drafting follow-up cells, and authoring
+enrichments as future extensions of the existing Kusto tools.
+
+Open question:
+
+- Which actions and result context should be offered, and how should users control data sharing?
+
+---
+
 ## Phase 7: Hardening and release
 
-**Status: not started.**
+**Status: not started; feature design discussions take priority for now.**
 
 Deliverables:
 
@@ -107,7 +190,8 @@ The first release will not include:
 - Persisted notebook outputs.
 - Automatic upload to Azure Blob Storage.
 - Ingestion into Log Analytics custom tables.
-- Transparent batching of many follow-on Azure queries.
+- Transparent batching of many follow-on Azure queries. The separate, explicit
+  [time-range query sharding proposal](#time-range-query-sharding) remains open for design discussion.
 - Collaborative notebook execution.
 - A webview framework migration.
 - Bundled security-specific IP, user, or host enrichment packs.
